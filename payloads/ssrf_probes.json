@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "description": "Benign SSRF detection probes. These target safe loopback and internal addresses. They carry no risk against external public targets but will reveal whether the server makes outbound connections to internal resources on behalf of user-supplied input.",
+    "safe": true
+  },
+  "url_parameter_keywords": [
+    "url", "dest", "destination", "redirect", "redirect_uri", "redirect_url",
+    "return", "return_url", "returnurl", "src", "source", "link", "href",
+    "path", "uri", "page", "fetch", "load", "download", "proxy", "host",
+    "site", "callback", "next", "forward", "target", "image", "img",
+    "file", "open", "ref", "referer"
+  ],
+  "loopback_probes": [
+    {
+      "id": "ssrf_ipv4_loopback_80",
+      "value": "http://127.0.0.1:80",
+      "description": "IPv4 loopback on port 80"
+    },
+    {
+      "id": "ssrf_ipv4_loopback_443",
+      "value": "http://127.0.0.1:443",
+      "description": "IPv4 loopback on port 443"
+    },
+    {
+      "id": "ssrf_localhost_http",
+      "value": "http://localhost",
+      "description": "Hostname-based localhost reference"
+    },
+    {
+      "id": "ssrf_ipv6_loopback",
+      "value": "http://[::1]",
+      "description": "IPv6 loopback address"
+    },
+    {
+      "id": "ssrf_169_254_link_local",
+      "value": "http://169.254.169.254/latest/meta-data/",
+      "description": "AWS IMDSv1 metadata endpoint — cloud SSRF indicator"
+    },
+    {
+      "id": "ssrf_metadata_google",
+      "value": "http://metadata.google.internal/computeMetadata/v1/",
+      "description": "GCP instance metadata endpoint"
+    }
+  ]
+}

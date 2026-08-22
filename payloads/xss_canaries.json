@@ -1,0 +1,79 @@
+{
+  "meta": {
+    "description": "Safe alphanumeric canary tokens for reflected XSS detection. Each probe contains harmless delimiter boundary characters so that verbatim, unencoded reflection in an HTML context is a reliable indicator of a missing output-encoding control.",
+    "usage": "Inject each probe string into a GET/POST parameter. If the boundary characters appear in the response body without HTML entity encoding, the endpoint is likely vulnerable to reflected XSS.",
+    "safe": true
+  },
+  "probes": [
+    {
+      "id": "xss_basic_tag_open",
+      "value": "vdastXSS1<vdast",
+      "boundary_chars": ["<"],
+      "description": "Detects raw < reflection — sufficient for tag injection context"
+    },
+    {
+      "id": "xss_angle_brackets",
+      "value": "vdastXSS2<script>vdast</script>",
+      "boundary_chars": ["<", ">"],
+      "description": "Classic script-tag canary; expects full angle-bracket reflection"
+    },
+    {
+      "id": "xss_double_quote_attr",
+      "value": "vdastXSS3\" onmouseover=\"vdast",
+      "boundary_chars": ["\""],
+      "description": "Detects unescaped double-quote reflection inside HTML attribute values"
+    },
+    {
+      "id": "xss_single_quote_attr",
+      "value": "vdastXSS4' onmouseover='vdast",
+      "boundary_chars": ["'"],
+      "description": "Detects unescaped single-quote reflection inside HTML attribute values"
+    },
+    {
+      "id": "xss_full_boundary_set",
+      "value": "vdastXSS5<>\"'/;",
+      "boundary_chars": ["<", ">", "\"", "'", "/", ";"],
+      "description": "Comprehensive boundary canary — checks all six high-risk delimiter characters in one probe"
+    },
+    {
+      "id": "xss_js_break_out",
+      "value": "vdastXSS6</script><script>vdast",
+      "boundary_chars": ["<", ">", "/"],
+      "description": "Script-context breakout: attempts to close an existing <script> block"
+    },
+    {
+      "id": "xss_html_comment_break",
+      "value": "vdastXSS7-->vdast<!--",
+      "boundary_chars": [">", "<"],
+      "description": "HTML comment-context breakout probe"
+    },
+    {
+      "id": "xss_event_handler",
+      "value": "vdastXSS8\"><img src=x onerror=vdast>",
+      "boundary_chars": ["\"", "<", ">"],
+      "description": "Attribute breakout with event handler injection probe"
+    },
+    {
+      "id": "xss_semicolon_separator",
+      "value": "vdastXSS9;vdast;",
+      "boundary_chars": [";"],
+      "description": "Semicolon boundary test — useful for JS and CSS injection contexts"
+    },
+    {
+      "id": "xss_slash_probe",
+      "value": "vdastXSS10/vdast/",
+      "boundary_chars": ["/"],
+      "description": "Forward-slash probe for path-segment and self-closing tag contexts"
+    }
+  ],
+  "encoded_forms": {
+    "description": "HTML entity encodings that indicate SAFE (properly escaped) reflection. If the response contains these encoded forms instead of raw boundary chars, the endpoint is NOT vulnerable.",
+    "mapping": {
+      "<":  "&lt;",
+      ">":  "&gt;",
+      "\"": "&quot;",
+      "'":  "&#39;",
+      "/":  "&#x2F;"
+    }
+  }
+}

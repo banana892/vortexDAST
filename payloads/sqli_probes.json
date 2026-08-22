@@ -1,0 +1,136 @@
+{
+  "meta": {
+    "description": "Benign SQL syntax-boundary probes for error-based SQL Injection detection. These markers are designed to break SQL query structure and elicit DBMS error messages WITHOUT executing any destructive SQL statements.",
+    "usage": "Append each boundary string to a parameter value. Match the HTTP response body against the DBMS error patterns defined below.",
+    "safe": true,
+    "references": [
+      "https://owasp.org/www-community/attacks/SQL_Injection",
+      "https://portswigger.net/web-security/sql-injection"
+    ]
+  },
+  "boundary_probes": [
+    {
+      "id": "sqli_single_quote",
+      "value": "'",
+      "description": "Classic single-quote string terminator — most common SQLi trigger"
+    },
+    {
+      "id": "sqli_double_quote",
+      "value": "\"",
+      "description": "Double-quote string terminator — used in MySQL ANSI mode and MSSQL"
+    },
+    {
+      "id": "sqli_single_quote_close_paren",
+      "value": "')",
+      "description": "Closes a string AND a parenthesised expression — targets function call contexts"
+    },
+    {
+      "id": "sqli_double_quote_close_paren",
+      "value": "\")",
+      "description": "Double-quote variant of the parenthesis-close probe"
+    },
+    {
+      "id": "sqli_sql_comment_dash",
+      "value": "--",
+      "description": "SQL line comment — neutralises the remainder of the original query"
+    },
+    {
+      "id": "sqli_sql_comment_hash",
+      "value": "#",
+      "description": "MySQL-style hash comment"
+    },
+    {
+      "id": "sqli_boolean_and_1eq1",
+      "value": "' AND '1'='1",
+      "description": "Tautology probe — always-true condition to detect Boolean-based blind SQLi via response size diff"
+    },
+    {
+      "id": "sqli_boolean_and_1eq2",
+      "value": "' AND '1'='2",
+      "description": "Contradiction probe — always-false condition pair for Boolean blind detection"
+    },
+    {
+      "id": "sqli_backtick",
+      "value": "`",
+      "description": "MySQL identifier quote character — can cause syntax errors in MySQL"
+    },
+    {
+      "id": "sqli_semicolon",
+      "value": ";",
+      "description": "Statement separator — reveals stacked-query support (PostgreSQL, MSSQL)"
+    }
+  ],
+  "dbms_error_patterns": {
+    "description": "Compiled regex patterns matching known DBMS error strings. Keys are DBMS names; values are lists of regex patterns. All patterns are case-INSENSITIVE.",
+    "patterns": {
+      "MySQL": [
+        "you have an error in your sql syntax",
+        "warning:\\s*mysql_",
+        "mysql_fetch_array\\(\\)",
+        "mysql_num_rows\\(\\)",
+        "supplied argument is not a valid mysql result",
+        "column count doesn't match value count",
+        "table '[^']+' doesn't exist",
+        "unknown column '[^']+' in 'field list'"
+      ],
+      "MariaDB": [
+        "mariadb error",
+        "mariadb server version for the right syntax"
+      ],
+      "PostgreSQL": [
+        "pg_query\\(\\):",
+        "pg_exec\\(\\):",
+        "postgresql query failed",
+        "error:\\s+parser:\\s+parse error",
+        "unterminated quoted string at or near",
+        "syntax error at or near",
+        "pg_connect\\(\\) failed",
+        "supplied argument is not a valid postgresql result",
+        "invalid input syntax for (type )?integer"
+      ],
+      "SQLite": [
+        "sqlite3::exception",
+        "sqlite3_query\\(\\)",
+        "sqlite error",
+        "near \"[^\"]+\":\\s*syntax error",
+        "unrecognized token"
+      ],
+      "MSSQL": [
+        "\\[microsoft\\]\\[odbc sql server driver\\]",
+        "\\[sql server\\]",
+        "driver\\]\\[sql server\\]unclosed quotation mark",
+        "unclosed quotation mark after the character string",
+        "incorrect syntax near",
+        "microsoft ole db provider for sql server",
+        "microsoft jet database engine error"
+      ],
+      "Oracle": [
+        "ora-[0-9]{4,5}:",
+        "oracle error",
+        "oracle.*driver",
+        "sql command not properly ended",
+        "quoted string not properly terminated",
+        "pl/sql: ora-"
+      ],
+      "Generic": [
+        "sql syntax.*error",
+        "sql error",
+        "database error",
+        "odbc.*error",
+        "jdbc.*error",
+        "warning.*failed to execute query",
+        "unexpected end of command in statement"
+      ]
+    }
+  },
+  "false_positive_filter": {
+    "description": "Strings that, if present in the BASELINE (unmodified) response, indicate the server ALREADY returns database errors. Matches here should cause the finding to be suppressed as a pre-existing condition.",
+    "baseline_error_indicators": [
+      "internal server error",
+      "500 internal server error",
+      "application error",
+      "database connection failed",
+      "error connecting to database"
+    ]
+  }
+}

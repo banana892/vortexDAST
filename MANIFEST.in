@@ -1,0 +1,20 @@
+# MANIFEST.in – controls which extra files are included in `sdist` tarballs.
+# pip editable installs and wheel builds do not use this file directly, but it
+# is required for `python setup.py sdist` and PEP 517 source distributions.
+
+include README.md
+include LICENSE
+include config.yaml
+include requirements.txt
+include pyproject.toml
+
+# Payload JSON files must travel with the package.
+recursive-include payloads *.json
+
+# Exclude compiled bytecode and test artefacts from source distributions.
+global-exclude __pycache__
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude *.egg-info
+prune tests
+prune .pytest_cache

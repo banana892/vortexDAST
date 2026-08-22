@@ -1,0 +1,85 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# VortexDAST - Default Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# All values here serve as defaults; they can be overridden at runtime via CLI
+# flags or by supplying an alternate --config path.
+
+# ── Crawler Settings ─────────────────────────────────────────────────────────
+crawler:
+  # Maximum BFS traversal depth starting from the seed URL.
+  # Increase for deeper coverage; decrease to limit scan time.
+  max_depth: 3
+
+  # Whether to also launch a Playwright headless browser crawl for SPAs.
+  # Requires `playwright install chromium` to be run once.
+  dynamic_crawl: false
+
+# ── Request / HTTP Client Settings ───────────────────────────────────────────
+requester:
+  # Per-request timeout in seconds (connect + read).
+  timeout: 10
+
+  # Default User-Agent string sent with every request.
+  user_agent: "VortexDAST/1.0 (Security Scanner; +https://github.com/vortexdast)"
+
+  # Maximum requests per second to avoid overwhelming the target server.
+  # Set to 0 to disable rate-limiting (not recommended against production).
+  rate_limit_rps: 5
+
+  # Set to false to accept self-signed / invalid TLS certificates.
+  # ⚠ WARNING: Only disable for local lab / controlled test environments.
+  verify_ssl: true
+
+  # Maximum number of retry attempts on transient connection errors.
+  max_retries: 3
+
+  # HTTP proxy (optional). Set to null or remove the key to disable.
+  # proxy: "http://127.0.0.1:8080"
+  proxy: null
+
+# ── Scope / Whitelist Rules ───────────────────────────────────────────────────
+scope:
+  # List of allowed base domains. Only URLs whose netloc matches one of these
+  # entries will be crawled and tested. Leave empty ([]) to auto-derive from
+  # the seed URL at runtime.
+  allowed_domains: []
+
+  # Optional URL path prefixes to restrict crawling to a sub-section of the
+  # application. Leave empty ([]) to allow all paths within the allowed domains.
+  allowed_paths: []
+
+  # URL path prefixes to exclude (e.g., logout endpoints, destructive actions).
+  excluded_paths:
+    - "/logout"
+    - "/signout"
+    - "/delete"
+
+  # File extensions to skip (static assets irrelevant to security testing).
+  excluded_extensions:
+    - ".css"
+    - ".js"
+    - ".png"
+    - ".jpg"
+    - ".jpeg"
+    - ".gif"
+    - ".svg"
+    - ".ico"
+    - ".woff"
+    - ".woff2"
+    - ".ttf"
+    - ".eot"
+    - ".pdf"
+    - ".zip"
+
+# ── Output Settings ───────────────────────────────────────────────────────────
+output:
+  # Directory where scan reports will be written.
+  report_dir: "./reports"
+
+  # Output formats to generate: json | markdown | html
+  formats:
+    - json
+    - markdown
+
+  # Whether to print verbose scan progress to the terminal.
+  verbose: false
