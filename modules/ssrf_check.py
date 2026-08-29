@@ -59,12 +59,44 @@ from urllib.parse import urlencode, urlparse
 
 from .base import BaseScannerModule, Finding, Severity
 from core.crawler import CrawledEndpoint
+from core.cvss import build_vector, calculate as cvss_calc
 from core.parser import ParsedForm
 
 logger = logging.getLogger(__name__)
 
 _PAYLOADS_DIR = os.path.join(os.path.dirname(__file__), "..", "payloads")
 _SSRF_PROBES_PATH = os.path.join(_PAYLOADS_DIR, "ssrf_probes.json")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CVSS v3.1 vectors for SSRF finding severities
+# ─────────────────────────────────────────────────────────────────────────────
+# HIGH: body marker confirmed  – loopback content returned in response
+#   AV:N / AC:L / PR:N / UI:N / S:C / C:H / I:H / A:N  → 9.6
+_CVSS_VECTOR_SSRF_HIGH = build_vector(
+    AV="N", AC="L", PR="N", UI="N", S="C", C="H", I="H", A="N"
+)
+_CVSS_SCORE_SSRF_HIGH: float = cvss_calc(_CVSS_VECTOR_SSRF_HIGH)  # 9.6
+
+# MEDIUM: status code changed + slow response – probable SSRF, unconfirmed
+#   AV:N / AC:H / PR:N / UI:N / S:C / C:L / I:L / A:N  → 5.4
+_CVSS_VECTOR_SSRF_MEDIUM = build_vector(
+    AV="N", AC="H", PR="N", UI="N", S="C", C="L", I="L", A="N"
+)
+_CVSS_SCORE_SSRF_MEDIUM: float = cvss_calc(_CVSS_VECTOR_SSRF_MEDIUM)  # 5.4
+
+# LOW: single weak signal (status change only OR timing only)
+#   AV:N / AC:H / PR:N / UI:N / S:U / C:L / I:N / A:N  → 3.7
+_CVSS_VECTOR_SSRF_LOW = build_vector(
+    AV="N", AC="H", PR="N", UI="N", S="U", C="L", I="N", A="N"
+)
+_CVSS_SCORE_SSRF_LOW: float = cvss_calc(_CVSS_VECTOR_SSRF_LOW)  # 3.7
+
+# Severity → (vector, score) lookup used in Finding() construction.
+_SSRF_CVSS: Dict[Severity, Tuple[str, float]] = {
+    Severity.HIGH:   (_CVSS_VECTOR_SSRF_HIGH,   _CVSS_SCORE_SSRF_HIGH),
+    Severity.MEDIUM: (_CVSS_VECTOR_SSRF_MEDIUM, _CVSS_SCORE_SSRF_MEDIUM),
+    Severity.LOW:    (_CVSS_VECTOR_SSRF_LOW,    _CVSS_SCORE_SSRF_LOW),
+}
 
 # Minimum response-time delta (seconds) to treat as a timing-based signal.
 _TIMING_DELTA_THRESHOLD_S: float = 2.5
@@ -450,6 +482,10 @@ class SSRFCheckModule(BaseScannerModule):
             url, parameter, probe["value"], severity.value,
         )
 
+        _cvss_vector, _cvss_score = _SSRF_CVSS.get(
+            severity, (_CVSS_VECTOR_SSRF_LOW, _CVSS_SCORE_SSRF_LOW)
+        )
+
         return Finding(
             title=f"Potential SSRF — {probe['description']}",
             severity=severity,
@@ -471,6 +507,8 @@ class SSRFCheckModule(BaseScannerModule):
                 "functionality and enforce metadata endpoint blocking on cloud hosts "
                 "(IMDSv2 on AWS, metadata server firewall rules on GCP)."
             ),
+            cvss_vector=_cvss_vector,
+            cvss_score=_cvss_score,
             extra={
                 "probe_id": probe.get("id"),
                 "probe_value": probe["value"],

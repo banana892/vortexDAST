@@ -10,8 +10,10 @@ Workflow
 2.  Load ``config.yaml`` (falls back to built-in defaults if not found).
 3.  Apply CLI overrides on top of config values.
 4.  Initialise a shared :class:`~core.requester.Requester` session.
-5.  Run the :class:`~core.crawler.Crawler` to build the attack surface.
-6.  Sequentially execute each selected scanner module against every endpoint.
+5.  Run the :class:`~core.crawler.Crawler` to build the attack surface
+    (displayed with a live Rich progress spinner).
+6.  Sequentially execute each selected scanner module against every endpoint
+    (displayed with a live Rich progress bar with ETA).
 7.  Aggregate all :class:`~modules.base.Finding` objects.
 8.  Render a Rich terminal dashboard via :class:`~core.reporter.Reporter`.
 9.  Save JSON and/or Markdown report files if ``--output`` is specified.
@@ -24,53 +26,111 @@ CLI Usage
     vortex -u http://testphp.vulnweb.com -m xss_check,sqli_check --max-depth 2
     vortex -u https://app.local -k -o reports/result.json
     vortex -u http://target.com --rate-limit 2 --modules all -o scan.md
+    vortex --list-modules
 
     # or equivalently:
     vortexdast -u https://target.example.com
 
 Module names
 ------------
-``headers_audit``, ``xss_check``, ``sqli_check``, ``ssrf_check``, or ``all``.
+Discovered dynamically from the ``modules/`` package. Use ``--list-modules``
+to print all registered modules with their short IDs and descriptions.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import logging
 import os
+import pkgutil
 import sys
+import threading
 import time
-from typing import Any, Dict, List, Optional, Type
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import yaml
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
+from rich.table import Table
 
 # Project-root path manipulation so the script runs from the repo root.
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from core.crawler import Crawler, CrawlResult
+from core.crawler import CrawlResult, CrawledEndpoint, Crawler
 from core.reporter import Reporter
 from core.requester import Requester
 from modules.base import BaseScannerModule, Finding
-from modules.headers_audit import HeadersAuditModule
-from modules.xss_check import XSSCheckModule
-from modules.sqli_check import SQLiCheckModule
-from modules.ssrf_check import SSRFCheckModule
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Module registry
+# Module registry – dynamic discovery
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: Maps CLI module names → module classes.
-MODULE_REGISTRY: Dict[str, Type[BaseScannerModule]] = {
-    "headers_audit": HeadersAuditModule,
-    "xss_check":     XSSCheckModule,
-    "sqli_check":    SQLiCheckModule,
-    "ssrf_check":    SSRFCheckModule,
-}
+
+def _discover_modules() -> Dict[str, Type[BaseScannerModule]]:
+    """
+    Auto-discover and map all concrete :class:`~modules.base.BaseScannerModule`
+    subclasses found in the ``modules/`` package.
+
+    The function walks every submodule under the ``modules`` package using
+    :mod:`pkgutil`, imports each one, then introspects the subclass tree of
+    :class:`BaseScannerModule` to collect all concrete (non-abstract) classes
+    that declare a non-empty, non-``"base"`` ``name`` attribute.
+
+    Returns
+    -------
+    dict[str, type[BaseScannerModule]]
+        Mapping of ``module.name`` → module class, ready to use as
+        ``MODULE_REGISTRY``.
+
+    Notes
+    -----
+    Adding a new scanner module is now zero-config: drop a file in
+    ``modules/``, subclass ``BaseScannerModule``, set ``name`` and
+    ``description``, and it will be auto-registered on the next run.
+    """
+    import modules as _modules_pkg  # noqa: PLC0415 – deferred to avoid circular imports
+
+    # Walk and import every submodule so their classes are registered in the
+    # subclass tree before we introspect it.
+    for _, modname, _ in pkgutil.walk_packages(
+        path=_modules_pkg.__path__,
+        prefix=_modules_pkg.__name__ + ".",
+    ):
+        try:
+            importlib.import_module(modname)
+        except Exception as exc:  # pragma: no cover
+            logging.getLogger("vortexdast").warning(
+                "Could not import module %s: %s", modname, exc
+            )
+
+    registry: Dict[str, Type[BaseScannerModule]] = {}
+    stack: List[Type[BaseScannerModule]] = list(BaseScannerModule.__subclasses__())
+
+    while stack:
+        cls = stack.pop()
+        stack.extend(cls.__subclasses__())
+        # Skip abstract bases and the placeholder base entry.
+        if cls.name and cls.name != "base":
+            registry[cls.name] = cls
+
+    return registry
+
+
+#: Maps CLI module short-IDs → concrete module classes.
+#: Built once at import-time via dynamic subclass introspection.
+MODULE_REGISTRY: Dict[str, Type[BaseScannerModule]] = _discover_modules()
 
 _DEFAULT_CONFIG_PATH = os.path.join(_ROOT, "config.yaml")
 
@@ -163,6 +223,80 @@ def _load_config(path: str) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Rich helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _print_module_table(console: Optional[Console] = None) -> None:
+    """
+    Pretty-print all registered scanner modules as a Rich table.
+
+    Displays three columns: **ID** (the CLI ``--modules`` name), **Class**
+    (the Python class name), and **Description** (human-readable summary).
+
+    Parameters
+    ----------
+    console : rich.console.Console | None
+        Rich console to render into.  A default ``Console()`` is used when
+        ``None`` is passed.
+    """
+    con = console or Console()
+
+    table = Table(
+        title="\n[bold magenta]VortexDAST — Registered Scanner Modules[/bold magenta]",
+        title_justify="left",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="bright_black",
+        show_lines=True,
+        expand=False,
+        padding=(0, 1),
+    )
+    table.add_column("ID", style="bold yellow", no_wrap=True, min_width=16)
+    table.add_column("Class", style="dim white", no_wrap=True, min_width=22)
+    table.add_column("Description", style="white", overflow="fold")
+
+    for mod_id, cls in sorted(MODULE_REGISTRY.items()):
+        table.add_row(mod_id, cls.__name__, cls.description)
+
+    con.print(table)
+    con.print(
+        f"\n  [dim]Total: [bold]{len(MODULE_REGISTRY)}[/bold] module(s) registered.[/dim]\n"
+        "  Use [bold yellow]-m MODULE_ID[/bold yellow] or "
+        "[bold yellow]--modules all[/bold yellow] to select them.\n"
+    )
+
+
+def _make_fuzz_progress(console: Console) -> Progress:
+    """
+    Build a :class:`rich.progress.Progress` instance configured for the fuzz phase.
+
+    Columns: spinner | description text | bar | X/Y | ETA.
+
+    Parameters
+    ----------
+    console : Console
+        The shared Rich console to render into.
+
+    Returns
+    -------
+    rich.progress.Progress
+        Ready-to-use progress context (not yet started).
+    """
+    return Progress(
+        SpinnerColumn(spinner_name="dots2"),
+        TextColumn("{task.description}", justify="left"),
+        BarColumn(bar_width=36),
+        TaskProgressColumn(),
+        TextColumn("[dim]ETA[/dim]"),
+        TimeRemainingColumn(),
+        console=console,
+        transient=False,
+        expand=False,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI argument parser
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -178,21 +312,34 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
+            "  vortex --list-modules\n"
             "  vortex -u http://testphp.vulnweb.com\n"
             "  vortex -u https://app.local -k -m xss_check,sqli_check\n"
             "  vortex -u http://target.com --max-depth 2 -o results.json\n"
-            "  vortex -u http://target.com --modules all --rate-limit 20 -t 20\n"
-            "  vortex -u http://target.com --max-endpoints 10 -t 5 --rate-limit 10\n"
+            "  vortex -u http://target.com --modules all --rate-limit 20 --concurrency 20\n"
+            "  vortex -u http://target.com --max-endpoints 10 --timeout 5 --rate-limit 10\n"
             "  vortexdast -u http://target.com --dynamic --verbose\n"
+        ),
+    )
+
+    # ── Discovery ─────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--list-modules",
+        action="store_true",
+        default=False,
+        help=(
+            "Print a Rich table of all registered scanner modules with their "
+            "IDs and descriptions, then exit with code 0."
         ),
     )
 
     # ── Required ─────────────────────────────────────────────────────────────
     parser.add_argument(
         "--target", "-u",
-        required=True,
+        required=False,   # Not required when --list-modules is used.
+        default=None,
         metavar="URL",
-        help="Target base URL to scan (required). Example: https://target.example.com",
+        help="Target base URL to scan (required unless --list-modules). Example: https://target.example.com",
     )
 
     # ── Scan configuration ────────────────────────────────────────────────────
@@ -209,7 +356,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="MODULES",
         help=(
             'Comma-separated list of modules to run, or "all". '
-            f"Available: {', '.join(MODULE_REGISTRY.keys())}. "
+            f"Run --list-modules to see all available IDs. "
             "Default: all"
         ),
     )
@@ -232,7 +379,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Number of concurrent worker threads used by scanner modules. "
             "Higher values reduce wall-clock time for probe-heavy modules (XSS, SQLi, SSRF). "
-            "Default: 10. Recommended range: 5–20."
+            "Default: 10. Recommended range: 5–20. "
+            "See also: --concurrency (alias that takes precedence)."
+        ),
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Number of concurrent worker threads (alias for --threads; "
+            "takes precedence when both are specified). "
+            "Recommended range: 5–20."
+        ),
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        metavar="SECS",
+        help=(
+            "Per-request HTTP timeout in seconds. "
+            "Overrides the value in config.yaml (usually 10 s). "
+            "Useful for slow targets (raise to 30) or CI speed (lower to 5)."
         ),
     )
     parser.add_argument(
@@ -274,7 +444,42 @@ def _build_parser() -> argparse.ArgumentParser:
         help="HTTP proxy URL (e.g. http://127.0.0.1:8080).",
     )
 
-    # ── Output ────────────────────────────────────────────────────────────────
+    # ── Authentication & session ────────────────────────────────────────────
+    parser.add_argument(
+        "--cookie", "-C",
+        default=None,
+        metavar="STRING",
+        help=(
+            'Inject session cookies into every request. '
+            'Format: "NAME=VALUE; NAME2=VALUE2" (same as a browser Cookie header). '
+            'Example: --cookie "JSESSIONID=abc123; auth=true"'
+        ),
+    )
+    parser.add_argument(
+        "--header", "-H",
+        action="append",
+        default=None,
+        metavar="HEADER",
+        help=(
+            'Add a custom HTTP header to every request (may be repeated). '
+            'Format: "Name: Value". '
+            'Example: -H "Authorization: Bearer eyJhbG..." -H "X-API-Key: secret"'
+        ),
+    )
+    parser.add_argument(
+        "--auth-user",
+        default=None,
+        metavar="USER",
+        help="Username for HTTP Basic / Digest authentication.",
+    )
+    parser.add_argument(
+        "--auth-pass",
+        default=None,
+        metavar="PASS",
+        help="Password for HTTP Basic / Digest authentication (pair with --auth-user).",
+    )
+
+    # ── Output ──────────────────────────────────────────────────────────────────
     parser.add_argument(
         "--output", "-o",
         default=None,
@@ -332,6 +537,45 @@ def _resolve_modules(modules_arg: str) -> List[str]:
     return requested
 
 
+def _parse_custom_headers(raw_headers: Optional[List[str]]) -> Dict[str, str]:
+    """
+    Parse a list of ``"Name: Value"`` header strings into a dict.
+
+    Accepts the list produced by ``argparse`` ``append`` action from repeated
+    ``--header`` / ``-H`` flags.  Malformed entries (no colon, empty name) are
+    logged and skipped.
+
+    Parameters
+    ----------
+    raw_headers : list[str] | None
+        Raw header strings, e.g. ``["Authorization: Bearer tok", "X-Key: abc"]``.
+
+    Returns
+    -------
+    dict[str, str]
+        Header name → value mapping ready to pass as ``auth_headers`` to
+        :class:`~core.requester.Requester`.
+    """
+    if not raw_headers:
+        return {}
+
+    result: Dict[str, str] = {}
+    for raw in raw_headers:
+        if ":" not in raw:
+            logger.warning(
+                "--header: Skipping malformed header (no colon): %r", raw
+            )
+            continue
+        name, _, value = raw.partition(":")
+        name = name.strip()
+        if not name:
+            logger.warning(
+                "--header: Skipping header with empty name: %r", raw
+            )
+            continue
+        result[name] = value.strip()
+    return result
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Scan orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
@@ -372,7 +616,16 @@ def run_scan(args: argparse.Namespace) -> int:
     )
     verify_ssl: bool = not args.insecure
     proxy: Optional[str] = args.proxy or req_cfg.get("proxy")
-    threads: int = max(1, args.threads)          # --threads / -t
+
+    # --concurrency takes precedence over --threads when both are given.
+    threads: int = max(1, args.concurrency if args.concurrency is not None else args.threads)
+
+    # --timeout overrides config.yaml value.
+    timeout: int = (
+        args.timeout if args.timeout is not None
+        else int(req_cfg.get("timeout", 10))
+    )
+
     max_endpoints: Optional[int] = args.max_endpoints  # --max-endpoints
 
     selected_modules = _resolve_modules(args.modules)
@@ -380,39 +633,109 @@ def run_scan(args: argparse.Namespace) -> int:
     logger.info("Target : [bold cyan]%s[/bold cyan]", args.target)
     logger.info("Modules: %s", ", ".join(selected_modules))
     logger.info(
-        "Depth: %d | RPS: %.1f | Threads: %d | SSL verify: %s%s",
-        max_depth, rate_limit_rps, threads, verify_ssl,
+        "Depth: %d | Timeout: %ds | RPS: %.1f | Threads: %d | SSL verify: %s%s",
+        max_depth, timeout, rate_limit_rps, threads, verify_ssl,
         f" | Endpoint cap: {max_endpoints}" if max_endpoints else "",
     )
 
     # ── Initialise shared Requester ────────────────────────────────────────
+    # Resolve auth CLI args.
+    auth_headers: Dict[str, str] = _parse_custom_headers(args.header)
+    http_auth: Optional[Tuple[str, str]] = (
+        (args.auth_user, args.auth_pass)
+        if args.auth_user and args.auth_pass
+        else None
+    )
+    if args.auth_user and not args.auth_pass:
+        logger.warning(
+            "--auth-user supplied without --auth-pass — HTTP auth will not be configured."
+        )
+
     requester = Requester(
-        timeout=int(req_cfg.get("timeout", 10)),
+        timeout=timeout,
         user_agent=str(req_cfg.get("user_agent", "VortexDAST/1.0")),
         rate_limit_rps=rate_limit_rps,
         verify_ssl=verify_ssl,
         proxy=proxy,
         max_retries=int(req_cfg.get("max_retries", 3)),
         max_workers=threads,
+        cookies=args.cookie,
+        auth_headers=auth_headers or None,
+        http_auth=http_auth,
     )
 
     scan_start = time.monotonic()
+
+    # Explicit initialisation – avoids dir() anti-pattern in reporting block.
+    crawl_result: Optional[CrawlResult] = None
+    endpoints: List[CrawledEndpoint] = []
     all_findings: List[Finding] = []
 
     try:
-        # ── Phase 1: Crawl ─────────────────────────────────────────────────
-        logger.info("Starting BFS crawl…")
-        crawler = Crawler(requester=requester, max_depth=max_depth)
-        crawl_result: CrawlResult = crawler.crawl(
-            seed_url=args.target,
-            scope_config=scope_cfg,
+        # ── Phase 1: Crawl (live spinner) ──────────────────────────────────
+        # The concurrent crawler manages its own thread pool internally.
+        # We still wrap it in a daemon thread so we can show a Rich spinner
+        # while it runs — reading crawl_result.endpoints is safe under the GIL.
+        crawler = Crawler(
+            requester=requester,
+            max_depth=max_depth,
+            max_workers=threads,
+            max_endpoints=max_endpoints,
         )
-        logger.info(
-            "Crawl complete: [bold]%d[/bold] endpoints, [bold]%d[/bold] forms, "
-            "[bold]%d[/bold] failed",
-            len(crawl_result.endpoints),
-            crawl_result.total_forms,
-            len(crawl_result.failed_urls),
+
+        _crawl_exc: List[BaseException] = []
+
+        def _do_crawl() -> None:
+            nonlocal crawl_result
+            try:
+                crawl_result = crawler.crawl(
+                    seed_url=args.target,
+                    scope_config=scope_cfg,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                _crawl_exc.append(exc)
+
+        crawl_thread = threading.Thread(target=_do_crawl, daemon=True)
+
+        with Progress(
+            SpinnerColumn(spinner_name="bouncingBar"),
+            TextColumn("{task.description}"),
+            console=console,
+            transient=True,
+        ) as crawl_progress:
+            crawl_task = crawl_progress.add_task(
+                f"[bold cyan]Phase 1 — Crawling[/bold cyan]  "
+                f"[dim]{args.target}[/dim]  [dim](depth ≤ {max_depth})[/dim]",
+                total=None,  # indeterminate – we don't know the URL count upfront
+            )
+            crawl_thread.start()
+
+            while crawl_thread.is_alive():
+                discovered = len(crawl_result.endpoints) if crawl_result else 0
+                crawl_progress.update(
+                    crawl_task,
+                    description=(
+                        f"[bold cyan]Phase 1 — Crawling[/bold cyan]  "
+                        f"[dim]{args.target}[/dim]  "
+                        f"[green]{discovered}[/green] URL(s) found…"
+                    ),
+                )
+                time.sleep(0.25)
+
+            crawl_thread.join()
+
+        # Re-raise any exception from the crawl thread.
+        if _crawl_exc:
+            raise _crawl_exc[0]
+
+        if crawl_result is None:
+            raise RuntimeError("Crawl produced no result — unexpected state.")
+
+        console.print(
+            f"  [bold green]✓[/bold green] Crawl complete — "
+            f"[bold]{len(crawl_result.endpoints)}[/bold] endpoint(s), "
+            f"[bold]{crawl_result.total_forms}[/bold] form(s), "
+            f"[bold]{len(crawl_result.failed_urls)}[/bold] failed."
         )
 
         if not crawl_result.endpoints:
@@ -425,20 +748,15 @@ def run_scan(args: argparse.Namespace) -> int:
                 "not yet implemented in this phase.[/yellow]"
             )
 
-        # ── Endpoint cap (--max-endpoints) ────────────────────────────────
+        # ── Endpoint list ─────────────────────────────────────────────────
+        # max_endpoints is now enforced inside Crawler — no post-crawl slice.
         endpoints = crawl_result.endpoints
-        if max_endpoints and len(endpoints) > max_endpoints:
-            logger.info(
-                "--max-endpoints %d: capping crawl surface from %d → %d endpoints.",
-                max_endpoints, len(endpoints), max_endpoints,
-            )
-            endpoints = endpoints[:max_endpoints]
 
-        # ── Phase 3 & 4: Run scanner modules ──────────────────────────────
-        # Build module instances.  Modules that accept extra kwargs (e.g.
-        # XSSCheckModule) receive the thread-count so they can tune their
-        # internal concurrency accordingly.
+        # ── Phase 3 & 4: Run scanner modules (live progress bar) ──────────
+        # Build module instances.  XSSCheckModule accepts a use_threads kwarg
+        # to tune its internal concurrency based on the --threads setting.
         def _make_module(name: str) -> BaseScannerModule:
+            """Instantiate a module class, forwarding thread-count when applicable."""
             cls = MODULE_REGISTRY[name]
             if name == "xss_check":
                 return cls(requester, use_threads=threads > 1)  # type: ignore[call-arg]
@@ -448,27 +766,84 @@ def run_scan(args: argparse.Namespace) -> int:
             _make_module(name) for name in selected_modules
         ]
 
-        for module in module_instances:
-            logger.info("Running module: [bold]%s[/bold]", module.name)
-            module_findings: List[Finding] = []
+        total_probes = len(module_instances) * len(endpoints)
+        console.print(
+            f"\n  [bold]Phase 2 — Fuzzing[/bold]  "
+            f"[dim]{len(module_instances)} module(s) × {len(endpoints)} endpoint(s) "
+            f"= {total_probes} probe(s)[/dim]"
+        )
 
-            for endpoint in endpoints:
-                try:
-                    found = module.run(endpoint)
-                    module_findings.extend(found)
-                except Exception as exc:
-                    logger.error(
-                        "Module %s raised an exception on %s: %s",
-                        module.name, endpoint.url, exc,
-                        exc_info=args.verbose,
-                    )
+        with _make_fuzz_progress(console) as fuzz_progress:
+            for module in module_instances:
+                task_id = fuzz_progress.add_task(
+                    description=(
+                        f"[bold yellow]{module.name:<18}[/bold yellow]"
+                        f"[dim] waiting…[/dim]"
+                    ),
+                    total=len(endpoints),
+                )
 
-            logger.info(
-                "  [%s] → [bold]%d[/bold] finding(s)",
-                module.name,
-                len(module_findings),
-            )
-            all_findings.extend(module_findings)
+                module_findings: List[Finding] = []
+                # Lock protecting appends to module_findings across threads.
+                _findings_lock = threading.Lock()
+
+                def _probe(
+                    ep: "CrawledEndpoint",
+                    _mod: BaseScannerModule = module,
+                ) -> Tuple[str, List[Finding]]:
+                    """Probe one endpoint; return (url, findings) for progress tracking."""
+                    return ep.url, _mod.run(ep)
+
+                with ThreadPoolExecutor(
+                    max_workers=threads,
+                    thread_name_prefix="vdast-fuzz",
+                ) as fuzz_pool:
+                    future_map = {
+                        fuzz_pool.submit(_probe, ep): ep
+                        for ep in endpoints
+                    }
+
+                    for future in as_completed(future_map):
+                        ep = future_map[future]
+                        display_url = (
+                            ep.url[:70] + "…" if len(ep.url) > 70 else ep.url
+                        )
+                        try:
+                            _url, found = future.result()
+                            with _findings_lock:
+                                module_findings.extend(found)
+                        except Exception as exc:
+                            # Isolated per-endpoint — other futures continue.
+                            logger.error(
+                                "Module %s raised an exception on %s: %s",
+                                module.name, ep.url, exc,
+                                exc_info=args.verbose,
+                            )
+                        finally:
+                            fuzz_progress.update(
+                                task_id,
+                                description=(
+                                    f"[bold yellow]{module.name:<18}[/bold yellow]"
+                                    f"[dim]  {display_url}[/dim]"
+                                ),
+                            )
+                            fuzz_progress.advance(task_id)
+
+                # Mark task complete with a summary label.
+                fuzz_progress.update(
+                    task_id,
+                    description=(
+                        f"[bold yellow]{module.name:<18}[/bold yellow]"
+                        f"[bold green]  {len(module_findings)} finding(s)[/bold green]"
+                    ),
+                )
+
+                logger.info(
+                    "  [%s] → [bold]%d[/bold] finding(s)",
+                    module.name,
+                    len(module_findings),
+                )
+                all_findings.extend(module_findings)
 
     except KeyboardInterrupt:
         logger.warning("Scan interrupted by user.")
@@ -478,13 +853,14 @@ def run_scan(args: argparse.Namespace) -> int:
     scan_duration = time.monotonic() - scan_start
 
     # ── Phase 5: Reporting ─────────────────────────────────────────────────
-    scan_meta = {
+    scan_meta: Dict[str, Any] = {
         "scan_duration_s": f"{scan_duration:.2f}",
-        "endpoints_crawled": len(crawl_result.endpoints) if "crawl_result" in dir() else 0,
-        "endpoints_scanned": len(endpoints) if "endpoints" in dir() else 0,
+        "endpoints_crawled": len(crawl_result.endpoints) if crawl_result is not None else 0,
+        "endpoints_scanned": len(endpoints),
         "modules_run": ", ".join(selected_modules),
         "max_depth": max_depth,
         "threads": threads,
+        "timeout_s": timeout,
         "rate_limit_rps": rate_limit_rps,
         "ssl_verify": verify_ssl,
     }
@@ -528,12 +904,22 @@ def main() -> int:
     -------
     int
         Exit code propagated to the shell:
-          0 – Scan completed, no HIGH/CRITICAL findings.
+          0 – Scan completed, no HIGH/CRITICAL findings (or --list-modules).
           1 – Fatal error during scan initialisation.
           2 – Scan completed with HIGH or CRITICAL findings (CI/CD sentinel).
     """
     parser = _build_parser()
     args = parser.parse_args()
+
+    # ── --list-modules: print registry table and exit immediately ──────────
+    if args.list_modules:
+        _print_module_table()
+        return 0
+
+    # ── Validate that --target is provided for actual scans ───────────────
+    if not args.target:
+        parser.error("argument --target/-u is required when not using --list-modules.")
+
     return run_scan(args)
 
 

@@ -118,3 +118,17 @@ omit   = ["tests/*", "setup.py"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pyrefly (type-checker / LSP) configuration
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.pyrefly]
+# Pyrefly infers the import root automatically from the editable install and
+# project layout — `core.*` and `modules.*` are resolved from the repo root.
+# Listing the interpreter ensures pyrefly uses the correct site-packages.
+python_interpreter = "/usr/bin/python3"
+project_includes = [
+    "scanner.py",
+    "core/**/*.py",
+    "modules/**/*.py",
+]

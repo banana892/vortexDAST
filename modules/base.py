@@ -79,12 +79,27 @@ class Finding:
     extra: Dict[str, Any] = field(default_factory=dict)
     """Module-specific metadata (e.g. matched regex pattern, response diff)."""
 
+    cvss_vector: Optional[str] = None
+    """
+    CVSS v3.1 vector string calculated for this specific finding.
+    Example: ``"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"``
+    Set by each scanner module at Finding creation time via :mod:`core.cvss`.
+    """
+
+    cvss_score: Optional[float] = None
+    """
+    Calculated CVSS v3.1 base score (0.0 – 10.0).
+    Derived from :attr:`cvss_vector` using the official FIRST.org formula.
+    """
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialise the finding to a plain dict for JSON reporting."""
         return {
             "id": self.id,
             "title": self.title,
             "severity": self.severity.value,
+            "cvss_vector": self.cvss_vector,
+            "cvss_score": self.cvss_score,
             "url": self.url,
             "parameter": self.parameter,
             "payload": self.payload,

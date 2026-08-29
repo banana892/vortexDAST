@@ -39,11 +39,12 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from .base import BaseScannerModule, Finding, Severity
 from core.crawler import CrawledEndpoint
+from core.cvss import build_vector, calculate as cvss_calc
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,116 @@ _PERMISSIVE_REFERRER_POLICIES = {
     "no-referrer-when-downgrade",
     "",
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CVSS v3.1 vectors for header audit findings
+# ─────────────────────────────────────────────────────────────────────────────
+# Each entry maps a finding title to a pre-computed (vector, score) tuple.
+# Rationale comments follow each entry.
+# Headers are all passive misconfigurations (no active exploit by themselves);
+# they raise impact because they amplify other attack classes.
+
+def _v(*, AV: str, AC: str, PR: str, UI: str, S: str,  # noqa: N802
+       C: str, I: str, A: str) -> Tuple[str, float]:
+    """Build a (vector_str, score) pair for the CVSS lookup table."""
+    vec = build_vector(AV=AV, AC=AC, PR=PR, UI=UI, S=S, C=C, I=I, A=A)
+    return vec, cvss_calc(vec)
+
+
+_HEADER_CVSS: Dict[str, Tuple[str, float]] = {
+    # ── HSTS ────────────────────────────────────────────────────────────────
+    # Missing HSTS: network MitM (AV:A), high complexity, no priv, UI required
+    # to intercept; confidentiality only (credential sniffing).
+    # AV:A / AC:H / PR:N / UI:R / S:U / C:H / I:N / A:N  → 4.2 (MEDIUM)
+    "Missing Strict-Transport-Security (HSTS) Header":
+        _v(AV="A", AC="H", PR="N", UI="R", S="U", C="H", I="N", A="N"),
+    # Short max-age: same as missing but lower impact (partial window).
+    # AV:A / AC:H / PR:N / UI:R / S:U / C:L / I:N / A:N  → 2.6 (LOW)
+    "Strict-Transport-Security max-age Too Short":
+        _v(AV="A", AC="H", PR="N", UI="R", S="U", C="L", I="N", A="N"),
+    # Missing max-age: same as short.
+    "Strict-Transport-Security Missing max-age Directive":
+        _v(AV="A", AC="H", PR="N", UI="R", S="U", C="L", I="N", A="N"),
+    # Missing includeSubDomains: informational, low C only.
+    # AV:N / AC:H / PR:N / UI:R / S:U / C:L / I:N / A:N  → 3.1 (LOW)
+    "Strict-Transport-Security Missing includeSubDomains":
+        _v(AV="N", AC="H", PR="N", UI="R", S="U", C="L", I="N", A="N"),
+
+    # ── CSP ────────────────────────────────────────────────────────────────
+    # Missing CSP: amplifies XSS (requires another vuln; UI required).
+    # AV:N / AC:H / PR:N / UI:R / S:C / C:L / I:L / A:N  → 4.7 (MEDIUM)
+    "Missing Content-Security-Policy (CSP) Header":
+        _v(AV="N", AC="H", PR="N", UI="R", S="C", C="L", I="L", A="N"),
+    # unsafe-inline: directly enables inline XSS when combined with injection.
+    # AV:N / AC:L / PR:N / UI:R / S:C / C:L / I:L / A:N  → 6.1 (MEDIUM)
+    "Content-Security-Policy Allows 'unsafe-inline'":
+        _v(AV="N", AC="L", PR="N", UI="R", S="C", C="L", I="L", A="N"),
+    # unsafe-eval: enables DOM XSS escalation; same vector.
+    "Content-Security-Policy Allows 'unsafe-eval'":
+        _v(AV="N", AC="L", PR="N", UI="R", S="C", C="L", I="L", A="N"),
+    # Wildcard source: slightly lower impact (any origin, but AC still Low).
+    # AV:N / AC:L / PR:N / UI:R / S:U / C:L / I:L / A:N  → 5.4 (MEDIUM)
+    "Content-Security-Policy Contains Wildcard Source (*)":
+        _v(AV="N", AC="L", PR="N", UI="R", S="U", C="L", I="L", A="N"),
+
+    # ── X-Frame-Options ───────────────────────────────────────────────────────
+    # Missing XFO: clickjacking; UI required; integrity impact (user tricked).
+    # AV:N / AC:L / PR:N / UI:R / S:U / C:N / I:L / A:N  → 4.3 (MEDIUM)
+    "Missing X-Frame-Options Header":
+        _v(AV="N", AC="L", PR="N", UI="R", S="U", C="N", I="L", A="N"),
+    # Weak XFO value: same impact.
+    "X-Frame-Options Has Weak or Invalid Value":
+        _v(AV="N", AC="L", PR="N", UI="R", S="U", C="N", I="L", A="N"),
+
+    # ── X-Content-Type-Options ────────────────────────────────────────────────
+    # MIME sniffing: enables content-type confusion; AC:H (requires upload).
+    # AV:N / AC:H / PR:N / UI:R / S:U / C:L / I:L / A:N  → 3.7 (LOW)
+    "Missing X-Content-Type-Options Header":
+        _v(AV="N", AC="H", PR="N", UI="R", S="U", C="L", I="L", A="N"),
+    "X-Content-Type-Options Has Invalid Value":
+        _v(AV="N", AC="H", PR="N", UI="R", S="U", C="L", I="L", A="N"),
+
+    # ── Referrer-Policy ────────────────────────────────────────────────────────
+    # Missing/permissive referrer: leaks URL tokens to 3rd parties (C:L).
+    # AV:N / AC:L / PR:N / UI:R / S:U / C:L / I:N / A:N  → 4.3 (MEDIUM)
+    "Missing Referrer-Policy Header":
+        _v(AV="N", AC="L", PR="N", UI="R", S="U", C="L", I="N", A="N"),
+    "Permissive Referrer-Policy Detected":
+        _v(AV="N", AC="L", PR="N", UI="R", S="U", C="L", I="N", A="N"),
+
+    # ── Cookie flags ─────────────────────────────────────────────────────────
+    # Missing HttpOnly: JS can steal session cookies via XSS (needs XSS first).
+    # AV:N / AC:H / PR:N / UI:R / S:U / C:H / I:N / A:N  → 5.3 (MEDIUM)
+    "Cookie Missing HttpOnly Flag":
+        _v(AV="N", AC="H", PR="N", UI="R", S="U", C="H", I="N", A="N"),
+    # Missing Secure: cookie may travel over HTTP (MitM); AV:A.
+    # AV:A / AC:H / PR:N / UI:N / S:U / C:H / I:N / A:N  → 5.3 (MEDIUM)
+    "Cookie Missing Secure Flag":
+        _v(AV="A", AC="H", PR="N", UI="N", S="U", C="H", I="N", A="N"),
+    # Missing SameSite: CSRF vector; integrity impact.
+    # AV:N / AC:L / PR:N / UI:R / S:U / C:N / I:L / A:N  → 4.3 (MEDIUM)
+    "Cookie Missing SameSite Attribute":
+        _v(AV="N", AC="L", PR="N", UI="R", S="U", C="N", I="L", A="N"),
+    # SameSite=None without Secure: cookie sent cross-site over HTTP.
+    # AV:A / AC:L / PR:N / UI:N / S:U / C:H / I:N / A:N  → 6.5 (MEDIUM)
+    "Cookie SameSite=None Without Secure Flag":
+        _v(AV="A", AC="L", PR="N", UI="N", S="U", C="H", I="N", A="N"),
+}
+
+
+def _header_cvss(title: str) -> Dict[str, Any]:
+    """
+    Return a dict of ``cvss_vector`` and ``cvss_score`` kwargs for a
+    given finding title, ready to be unpacked into :class:`~modules.base.Finding`.
+
+    Falls back to ``None`` values if the title is not in the lookup table
+    (should not happen in practice, but guards against future regressions).
+    """
+    pair = _HEADER_CVSS.get(title)
+    if pair is None:
+        return {"cvss_vector": None, "cvss_score": None}
+    return {"cvss_vector": pair[0], "cvss_score": pair[1]}
+
 
 
 class HeadersAuditModule(BaseScannerModule):
@@ -169,6 +280,8 @@ class HeadersAuditModule(BaseScannerModule):
                         "Add: Strict-Transport-Security: max-age=31536000; "
                         "includeSubDomains; preload"
                     ),
+                    **_header_cvss("Missing Strict-Transport-Security (HSTS) Header"),
+
                     extra={"header": "Strict-Transport-Security"},
                 )
             )
@@ -190,6 +303,8 @@ class HeadersAuditModule(BaseScannerModule):
                         ),
                         remediation="Set max-age to at least 31536000 (1 year).",
                         evidence=hsts_value,
+                        **_header_cvss("Strict-Transport-Security max-age Too Short"),
+
                         extra={"header": "Strict-Transport-Security", "max_age": max_age},
                     )
                 )
@@ -202,6 +317,8 @@ class HeadersAuditModule(BaseScannerModule):
                     description="HSTS header present but lacks a valid max-age directive.",
                     remediation="Ensure the header includes a valid max-age value.",
                     evidence=hsts_value,
+                    **_header_cvss("Strict-Transport-Security Missing max-age Directive"),
+
                     extra={"header": "Strict-Transport-Security"},
                 )
             )
@@ -219,6 +336,8 @@ class HeadersAuditModule(BaseScannerModule):
                     ),
                     remediation="Add ``includeSubDomains`` to the HSTS header.",
                     evidence=hsts_value,
+                    **_header_cvss("Strict-Transport-Security Missing includeSubDomains"),
+
                     extra={"header": "Strict-Transport-Security"},
                 )
             )
@@ -248,6 +367,8 @@ class HeadersAuditModule(BaseScannerModule):
                         "Content-Security-Policy: default-src 'self'; "
                         "script-src 'self'; object-src 'none';"
                     ),
+                    **_header_cvss("Missing Content-Security-Policy (CSP) Header"),
+
                     extra={"header": "Content-Security-Policy"},
                 )
             )
@@ -271,6 +392,8 @@ class HeadersAuditModule(BaseScannerModule):
                         "for legitimate inline scripts instead."
                     ),
                     evidence=csp_value,
+                    **_header_cvss("Content-Security-Policy Allows 'unsafe-inline'"),
+
                     extra={"header": "Content-Security-Policy", "weakness": "unsafe-inline"},
                 )
             )
@@ -291,6 +414,8 @@ class HeadersAuditModule(BaseScannerModule):
                         "code-execution patterns."
                     ),
                     evidence=csp_value,
+                    **_header_cvss("Content-Security-Policy Allows 'unsafe-eval'"),
+
                     extra={"header": "Content-Security-Policy", "weakness": "unsafe-eval"},
                 )
             )
@@ -307,6 +432,8 @@ class HeadersAuditModule(BaseScannerModule):
                     ),
                     remediation="Replace wildcard sources with explicit, trusted origins.",
                     evidence=csp_value,
+                    **_header_cvss("Content-Security-Policy Contains Wildcard Source (*)"),
+
                     extra={"header": "Content-Security-Policy", "weakness": "wildcard"},
                 )
             )
@@ -335,6 +462,8 @@ class HeadersAuditModule(BaseScannerModule):
                         "Add: X-Frame-Options: DENY\n"
                         "Or use CSP: frame-ancestors 'none';"
                     ),
+                    **_header_cvss("Missing X-Frame-Options Header"),
+
                     extra={"header": "X-Frame-Options"},
                 )
             )
@@ -355,6 +484,8 @@ class HeadersAuditModule(BaseScannerModule):
                     ),
                     remediation="Set X-Frame-Options to DENY or SAMEORIGIN.",
                     evidence=xfo_value,
+                    **_header_cvss("X-Frame-Options Has Weak or Invalid Value"),
+
                     extra={"header": "X-Frame-Options"},
                 )
             )
@@ -380,6 +511,8 @@ class HeadersAuditModule(BaseScannerModule):
                         "a different content type."
                     ),
                     remediation="Add: X-Content-Type-Options: nosniff",
+                    **_header_cvss("Missing X-Content-Type-Options Header"),
+
                     extra={"header": "X-Content-Type-Options"},
                 )
             )
@@ -397,6 +530,8 @@ class HeadersAuditModule(BaseScannerModule):
                     ),
                     remediation="Set the header value to exactly 'nosniff'.",
                     evidence=xcto_value,
+                    **_header_cvss("X-Content-Type-Options Has Invalid Value"),
+
                     extra={"header": "X-Content-Type-Options"},
                 )
             )
@@ -425,6 +560,8 @@ class HeadersAuditModule(BaseScannerModule):
                         "Add: Referrer-Policy: strict-origin-when-cross-origin\n"
                         "Or use: no-referrer for the most restrictive behaviour."
                     ),
+                    **_header_cvss("Missing Referrer-Policy Header"),
+
                     extra={"header": "Referrer-Policy"},
                 )
             )
@@ -442,6 +579,8 @@ class HeadersAuditModule(BaseScannerModule):
                     ),
                     remediation="Use 'strict-origin-when-cross-origin' or stricter.",
                     evidence=rp_value,
+                    **_header_cvss("Permissive Referrer-Policy Detected"),
+
                     extra={"header": "Referrer-Policy"},
                 )
             )
@@ -480,6 +619,8 @@ class HeadersAuditModule(BaseScannerModule):
                         ),
                         remediation=f"Add the HttpOnly attribute to the '{cookie_name}' cookie.",
                         evidence=raw_cookie[:200],
+                        **_header_cvss("Cookie Missing HttpOnly Flag"),
+
                         extra={"cookie_name": cookie_name, "missing_flag": "HttpOnly"},
                     )
                 )
@@ -496,6 +637,8 @@ class HeadersAuditModule(BaseScannerModule):
                         ),
                         remediation=f"Add the Secure attribute to the '{cookie_name}' cookie.",
                         evidence=raw_cookie[:200],
+                        **_header_cvss("Cookie Missing Secure Flag"),
+
                         extra={"cookie_name": cookie_name, "missing_flag": "Secure"},
                     )
                 )
@@ -515,6 +658,8 @@ class HeadersAuditModule(BaseScannerModule):
                             f"Add SameSite=Lax or SameSite=Strict to '{cookie_name}'."
                         ),
                         evidence=raw_cookie[:200],
+                        **_header_cvss("Cookie Missing SameSite Attribute"),
+
                         extra={"cookie_name": cookie_name, "missing_flag": "SameSite"},
                     )
                 )
@@ -536,6 +681,8 @@ class HeadersAuditModule(BaseScannerModule):
                                     "when using SameSite=None."
                                 ),
                                 evidence=raw_cookie[:200],
+                                **_header_cvss("Cookie SameSite=None Without Secure Flag"),
+
                                 extra={
                                     "cookie_name": cookie_name,
                                     "weakness": "SameSite=None without Secure",

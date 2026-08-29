@@ -54,6 +54,7 @@ from urllib.parse import urlencode, urlparse
 
 from .base import BaseScannerModule, Finding, Severity
 from core.crawler import CrawledEndpoint
+from core.cvss import build_vector, calculate as cvss_calc
 from core.parser import ParsedForm, FormField
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,26 @@ _XSS_CANARIES_PATH = os.path.join(_PAYLOADS_DIR, "xss_canaries.json")
 
 # Number of leading probes used in quick-mode reflection screening.
 _QUICK_PROBE_COUNT = 3
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CVSS v3.1 vectors for XSS finding types
+# ─────────────────────────────────────────────────────────────────────────────
+# Reflected XSS:
+#   AV:N  – exploited over the network
+#   AC:L  – no special access conditions required
+#   PR:N  – no privileges needed
+#   UI:R  – victim must click a crafted link (user interaction required)
+#   S:C   – scope changed: browser security context affected
+#   C:L   – low confidentiality impact (cookie/session leakage possible)
+#   I:L   – low integrity impact (page content tampered)
+#   A:N   – no availability impact
+# Calculated base score: 6.1 (MEDIUM per CVSS 3.1; commonly reported as HIGH
+# due to realistic exploit impact, so we keep the Severity enum as HIGH).
+_CVSS_VECTOR_REFLECTED_XSS = build_vector(
+    AV="N", AC="L", PR="N", UI="R", S="C", C="L", I="L", A="N"
+)
+_CVSS_SCORE_REFLECTED_XSS: float = cvss_calc(_CVSS_VECTOR_REFLECTED_XSS)  # 6.1
+
 
 
 class XSSCheckModule(BaseScannerModule):
@@ -448,6 +469,8 @@ class XSSCheckModule(BaseScannerModule):
                 "template escaping (e.g., Jinja2 autoescaping, Django templates) "
                 "and never concatenate raw user input into HTML strings."
             ),
+            cvss_vector=_CVSS_VECTOR_REFLECTED_XSS,
+            cvss_score=_CVSS_SCORE_REFLECTED_XSS,
             extra={
                 "probe_id": probe.get("id"),
                 "method": method,

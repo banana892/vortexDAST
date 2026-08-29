@@ -8,6 +8,8 @@ from .headers_audit import HeadersAuditModule
 from .xss_check import XSSCheckModule
 from .sqli_check import SQLiCheckModule
 from .ssrf_check import SSRFCheckModule
+from .traversal_check import TraversalCheckModule
+from .csrf_check import CSRFCheckModule
 
 __all__ = [
     "BaseScannerModule",
@@ -17,4 +19,6 @@ __all__ = [
     "XSSCheckModule",
     "SQLiCheckModule",
     "SSRFCheckModule",
+    "TraversalCheckModule",
+    "CSRFCheckModule",
 ]

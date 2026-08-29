@@ -41,8 +41,10 @@ from modules.base import Finding, Severity
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-# CVSS v3.1 base score ranges and approximate mappings for each severity label.
-# These are illustrative ranges — real CVSS requires a full vector calculation.
+# CVSS v3.1 base score ranges — used only in the severity-level summary
+# table to show a representative score for each bucket. Individual findings
+# carry their own calculated :attr:`~modules.base.Finding.cvss_score` and
+# :attr:`~modules.base.Finding.cvss_vector`.
 _CVSS_RANGES: Dict[str, Dict[str, Any]] = {
     Severity.CRITICAL.value: {
         "range": "9.0 – 10.0",
@@ -172,16 +174,16 @@ class Reporter:
         )
         summary_table.add_column("Severity", style="bold", min_width=16)
         summary_table.add_column("Count", justify="center", min_width=8)
-        summary_table.add_column("CVSS Score (approx)", justify="center", min_width=20)
+        summary_table.add_column("CVSS v3.1 Score Range", justify="center", min_width=22)
 
         for sev in _SEVERITY_ORDER:
             count = len(self._by_severity[sev])
             style = _SEVERITY_STYLES[sev]
-            cvss = _CVSS_RANGES[sev]["score"]
+            cvss_range = _CVSS_RANGES[sev]["range"]
             summary_table.add_row(
                 Text(sev.upper(), style=style),
                 Text(str(count), style=style if count > 0 else "dim"),
-                Text(cvss, style="dim"),
+                Text(cvss_range, style="dim"),
             )
         c.print(summary_table)
         c.print()
@@ -205,17 +207,25 @@ class Reporter:
             detail_table.add_column("#", justify="right", min_width=3, style="dim")
             detail_table.add_column("Title", min_width=30)
             detail_table.add_column("URL", min_width=30, overflow="fold")
-            detail_table.add_column("Parameter", min_width=12)
+            detail_table.add_column("Param", min_width=12)
+            detail_table.add_column("CVSS", justify="center", min_width=6)
             detail_table.add_column("Module", min_width=14)
 
             for idx, finding in enumerate(bucket, start=1):
                 module_name = finding.extra.get("module", "headers_audit")
                 param_display = finding.parameter or "—"
+                # Show real per-finding CVSS score if available; fall back to
+                # the severity-bucket approximate score.
+                if finding.cvss_score is not None:
+                    cvss_display = str(finding.cvss_score)
+                else:
+                    cvss_display = _CVSS_RANGES[sev]["score"]
                 detail_table.add_row(
                     str(idx),
                     Text(finding.title, style=style),
                     Text(finding.url, style="link " + finding.url),
                     Text(param_display, style="italic"),
+                    Text(cvss_display, style=style),
                     Text(module_name, style="dim"),
                 )
             c.print(detail_table)
@@ -323,14 +333,12 @@ class Reporter:
             for k, v in self.scan_meta.items():
                 lines.append(f"| **{k.replace('_', ' ').title()}** | {v} |")
 
-        lines += ["", "---", ""]
-
-        # ── Executive summary ─────────────────────────────────────────────
         lines += [
+            "", "---", "",
             "## Executive Summary",
             "",
-            "| Severity | Count | Approx CVSS Range | Example CVSS Vector |",
-            "|----------|-------|-------------------|---------------------|",
+            "| Severity | Count | CVSS v3.1 Score Range | Representative Vector |",
+            "|----------|---------|-----------------------|-----------------------|",
         ]
         for sev in _SEVERITY_ORDER:
             count = len(self._by_severity[sev])
@@ -394,6 +402,15 @@ class Reporter:
             f"|-------|-------|",
             f"| **ID** | `{finding.id}` |",
             f"| **Severity** | **{finding.severity.value.upper()}** |",
+        ]
+
+        # Real CVSS v3.1 data — show score and full vector if available.
+        if finding.cvss_score is not None:
+            lines.append(f"| **CVSS v3.1 Score** | `{finding.cvss_score}` |")
+        if finding.cvss_vector:
+            lines.append(f"| **CVSS v3.1 Vector** | `{finding.cvss_vector}` |")
+
+        lines += [
             f"| **URL** | `{finding.url}` |",
         ]
 

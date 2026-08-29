@@ -651,8 +651,15 @@ class TestCLIParser:
         return parser.parse_args(args)
 
     def test_target_is_required(self) -> None:
+        # --target validation moved from argparse to main() so that
+        # --list-modules can run without a target.  We verify that calling
+        # main() with no arguments still raises SystemExit (via parser.error).
+        import sys as _sys
+        from unittest.mock import patch
         with pytest.raises(SystemExit):
-            _build_parser().parse_args([])
+            with patch.object(_sys, "argv", ["vortexdast"]):
+                from scanner import main
+                main()
 
     def test_target_short_flag(self) -> None:
         args = self._parse(["-u", "https://target.com"])

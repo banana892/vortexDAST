@@ -10,6 +10,16 @@ crawler:
   # Increase for deeper coverage; decrease to limit scan time.
   max_depth: 3
 
+  # Number of concurrent worker threads used during each BFS depth level.
+  # Higher values speed up crawling on multi-URL pages; honour the target's
+  # capacity. Overridden at runtime by --concurrency / --threads.
+  max_workers: 10
+
+  # Hard cap on the number of endpoints fetched. The crawler stops enqueuing
+  # new child URLs as soon as this limit is reached, saving unnecessary
+  # network requests. Set to null for unlimited. Overridden by --max-endpoints.
+  max_endpoints: null
+
   # Whether to also launch a Playwright headless browser crawl for SPAs.
   # Requires `playwright install chromium` to be run once.
   dynamic_crawl: false

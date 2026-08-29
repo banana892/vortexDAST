@@ -49,6 +49,7 @@ from urllib.parse import urlencode, urlparse
 
 from .base import BaseScannerModule, Finding, Severity
 from core.crawler import CrawledEndpoint
+from core.cvss import build_vector, calculate as cvss_calc
 from core.parser import ParsedForm
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,35 @@ _SQLI_PROBES_PATH = os.path.join(_PAYLOADS_DIR, "sqli_probes.json")
 # Minimum response-body length difference (as a fraction) to report
 # Boolean-blind SQLi when no explicit error pattern is found.
 _BLIND_LENGTH_THRESHOLD = 0.10  # 10 %
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CVSS v3.1 vectors for SQLi finding types
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Error-based SQLi (confirmed DBMS error): network-exploitable, no privileges,
+# no UI required, high C/I/A impact (full DB read/write/DoS possible).
+# AV:N / AC:L / PR:N / UI:N / S:U / C:H / I:H / A:H  → 9.8 (CRITICAL)
+_CVSS_VECTOR_SQLI_ERROR = build_vector(
+    AV="N", AC="L", PR="N", UI="N", S="U", C="H", I="H", A="H"
+)
+_CVSS_SCORE_SQLI_ERROR: float = cvss_calc(_CVSS_VECTOR_SQLI_ERROR)  # 9.8
+
+# HTTP-500 on probe (unconfirmed / probable SQLi): same attack surface but
+# lower confidence — reduced C/I to Low; A still High (server crashes).
+# AV:N / AC:L / PR:N / UI:N / S:U / C:L / I:L / A:H  → 7.3 (HIGH)
+_CVSS_VECTOR_SQLI_500 = build_vector(
+    AV="N", AC="L", PR="N", UI="N", S="U", C="L", I="L", A="H"
+)
+_CVSS_SCORE_SQLI_500: float = cvss_calc(_CVSS_VECTOR_SQLI_500)  # 7.3
+
+# Boolean-blind SQLi (heuristic / response length diff): higher complexity
+# required to exploit blindly; C/I at Low; no availability impact.
+# AV:N / AC:H / PR:N / UI:N / S:U / C:L / I:L / A:N  → 4.8 (MEDIUM)
+_CVSS_VECTOR_SQLI_BLIND = build_vector(
+    AV="N", AC="H", PR="N", UI="N", S="U", C="L", I="L", A="N"
+)
+_CVSS_SCORE_SQLI_BLIND: float = cvss_calc(_CVSS_VECTOR_SQLI_BLIND)  # 4.8
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,6 +379,8 @@ class SQLiCheckModule(BaseScannerModule):
                     "Additionally, disable verbose database error messages in production "
                     "to prevent information leakage."
                 ),
+                cvss_vector=_CVSS_VECTOR_SQLI_ERROR,
+                cvss_score=_CVSS_SCORE_SQLI_ERROR,
                 extra={
                     "dbms": matched_dbms,
                     "matched_pattern": matched_pattern.raw,
@@ -383,6 +415,8 @@ class SQLiCheckModule(BaseScannerModule):
                     "Use parameterised queries and implement proper exception handling "
                     "that does not propagate raw database errors to HTTP responses."
                 ),
+                cvss_vector=_CVSS_VECTOR_SQLI_500,
+                cvss_score=_CVSS_SCORE_SQLI_500,
                 extra={
                     "fuzzed_status": fuzzed_status,
                     "baseline_status": baseline_status,
@@ -530,6 +564,8 @@ class SQLiCheckModule(BaseScannerModule):
                 "differently on different inputs, verify that user data is not embedded "
                 "in SQL logic without sanitisation."
             ),
+            cvss_vector=_CVSS_VECTOR_SQLI_BLIND,
+            cvss_score=_CVSS_SCORE_SQLI_BLIND,
             extra={
                 "len_true_probe": len_true,
                 "len_false_probe": len_false,
