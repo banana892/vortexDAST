@@ -457,10 +457,10 @@ class TestReporterJSON:
 
     def test_summary_counts_by_severity(self) -> None:
         findings = [
-            _make_finding(severity=Severity.CRITICAL),
-            _make_finding(severity=Severity.HIGH),
-            _make_finding(severity=Severity.HIGH),
-            _make_finding(severity=Severity.LOW),
+            _make_finding(title="Finding 1", severity=Severity.CRITICAL),
+            _make_finding(title="Finding 2", severity=Severity.HIGH),
+            _make_finding(title="Finding 3", severity=Severity.HIGH),
+            _make_finding(title="Finding 4", severity=Severity.LOW),
         ]
         r = self._reporter(findings=findings)
         summary = r.to_dict()["summary"]["by_severity"]
