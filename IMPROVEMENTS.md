@@ -185,6 +185,8 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 - **Effort:** 3–4 days (requires crawler refactoring)
 
 #### 3.1.4 Cryptographic Failures Module
+**Status:** ✅ Done (2026-10-07) as `modules/transport_check.py` — cleartext-HTTP site, password forms over HTTP (HIGH), active vs. passive mixed content, and HTTP→HTTPS redirect check (default ports only). All passive, `certain` confidence. **Not done:** TLS protocol/cipher inspection — needs a raw TLS handshake rather than `requests`.
+
 **File:** `modules/crypto_check.py`
 - Detect mixed HTTP/HTTPS content
 - Flag weak SSL/TLS versions (if proxy inspection available)
