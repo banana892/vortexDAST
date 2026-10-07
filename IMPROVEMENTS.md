@@ -226,6 +226,8 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 - **Effort:** 2–3 days
 
 #### 3.2.3 HTTP Session Reuse
+**Status:** ✅ Already in place — `Requester` uses one `requests.Session` with a pooled `HTTPAdapter` sized to the worker count. No work needed.
+
 - [ ] Use persistent sessions across probes (already in `Requester`, but verify)
 - [ ] Connection pooling (HTTPAdapter with max_retries)
 - [ ] Keep-Alive headers in crawl + fuzzing phases
@@ -233,6 +235,8 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 - **Effort:** 1 day
 
 #### 3.2.4 Rate Limiting Awareness
+**Status:** ⚠️ Partly in place — urllib3 `Retry` already retries 429/5xx with backoff and honours `Retry-After`. Still missing: telling the user the target is throttling, and slowing the global rate limiter in response.
+
 - [ ] Detect HTTP 429 (Too Many Requests) responses
 - [ ] Auto-backoff and retry with exponential delay
 - [ ] Notify user if scan slowing down
@@ -252,6 +256,8 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 **Enhancements:**
 
 #### 3.3.1 SARIF Export
+**Status:** ✅ Done (2026-10-07) — `-o report.sarif`; schema-validated in tests against a vendored SARIF 2.1.0 schema; README has a GitHub Actions example.
+
 - [ ] Add SARIF 2.1.0 output format (OASIS standard)
 - [ ] Enables GitHub Code Scanning, VS Code integration
 - [ ] Map VortexDAST severities to SARIF levels

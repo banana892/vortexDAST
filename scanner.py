@@ -519,7 +519,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output", "-o",
         default=None,
         metavar="FILE",
-        help="Output file for the scan report (.json, .md, or .html). If omitted, terminal output only.",
+        help="Output file for the scan report (.json, .sarif, .md, or .html). If omitted, terminal output only.",
     )
     parser.add_argument(
         "--verbose", "-v",

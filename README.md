@@ -129,8 +129,8 @@ options:
                         heuristic hits that need manual verification.
   --suppress FILE       YAML file of suppression rules for known false
                         positives (see suppress.example.yaml).
-  --output, -o FILE     Output file for the scan report (.json, .md, or
-                        .html). If omitted, terminal output only.
+  --output, -o FILE     Output file for the scan report (.json, .sarif, .md,
+                        or .html). If omitted, terminal output only.
   --verbose, -v         Enable verbose DEBUG logging.
 
 Examples:
@@ -156,4 +156,31 @@ Every finding carries a `confidence` alongside its severity:
 Findings removed by `--min-severity`, `--min-confidence`, or `--suppress` rules don't appear in reports
 and don't count toward exit code `2`. Run with `-v` to see each filtered finding and the reason.
 See `suppress.example.yaml` for the rule format.
+
+## 5. CI Integration (SARIF)
+
+`-o report.sarif` (or `.sarif.json`) writes a SARIF 2.1.0 log. Each finding type becomes a rule
+(e.g. `dir_fuzzer/exposed-configuration-file`) whose `security-severity` is the highest CVSS score
+observed, and each result carries a stable fingerprint so alerts track across runs.
+
+Example GitHub Actions job against a staging deployment:
+
+```yaml
+security-scan:
+  runs-on: ubuntu-latest
+  permissions:
+    security-events: write
+  steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with: { python-version: "3.12" }
+    - run: pip install -e .
+    - run: vortex -u "$STAGING_URL" --min-confidence firm --suppress suppress.yaml -o vortex.sarif
+      env: { STAGING_URL: "${{ vars.STAGING_URL }}" }
+      continue-on-error: true   # exit code 2 = HIGH/CRITICAL found; let the upload still run
+    - uses: github/codeql-action/upload-sarif@v3
+      with: { sarif_file: vortex.sarif, category: vortexdast }
+```
+
+Only scan targets you own or are authorised to test.
 

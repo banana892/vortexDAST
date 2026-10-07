@@ -24,9 +24,11 @@ Usage
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -91,6 +93,25 @@ _SEVERITY_ORDER: List[str] = [
     Severity.LOW.value,
     Severity.INFORMATIONAL.value,
 ]
+
+
+_SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
+
+_SARIF_LEVELS: Dict[str, str] = {
+    Severity.CRITICAL.value: "error",
+    Severity.HIGH.value: "error",
+    Severity.MEDIUM.value: "warning",
+    Severity.LOW.value: "note",
+    Severity.INFORMATIONAL.value: "note",
+}
+
+
+def _sarif_rule_id(finding: Finding) -> str:
+    """Stable rule ID: module + title with per-instance suffixes (': /.env', ' — MySQL ...') dropped."""
+    module = str(finding.extra.get("module", "vortexdast")) if isinstance(finding.extra, dict) else "vortexdast"
+    base = re.split(r":| — ", finding.title or "finding", maxsplit=1)[0]
+    slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-") or "finding"
+    return f"{module}/{slug}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,11 +451,91 @@ class Reporter:
             fh.write(content)
         self._console.print(f"[green]✔[/green] HTML report saved → [cyan]{path}[/cyan]")
 
+    def to_sarif(self) -> Dict[str, Any]:
+        """Serialise findings as a SARIF 2.1.0 log (GitHub code scanning, IDEs, CI tooling)."""
+        rules: Dict[str, Dict[str, Any]] = {}
+        results: List[Dict[str, Any]] = []
+
+        for finding in self.findings:
+            rule_id = _sarif_rule_id(finding)
+            sev = finding.severity.value
+            rule = rules.get(rule_id)
+            if rule is None:
+                rule = rules[rule_id] = {
+                    "id": rule_id,
+                    "name": re.sub(r"[^A-Za-z0-9]", "", rule_id.split("/", 1)[1].title()),
+                    "shortDescription": {"text": re.split(r":| — ", finding.title, maxsplit=1)[0].strip()},
+                    "fullDescription": {"text": finding.description or finding.title},
+                    "help": {"text": finding.remediation or "See finding description."},
+                    "defaultConfiguration": {"level": _SARIF_LEVELS.get(sev, "note")},
+                    "properties": {"tags": ["security", "dast"]},
+                }
+            # GitHub derives alert severity from the highest score seen for the rule.
+            score = (
+                finding.cvss_score
+                if finding.cvss_score is not None
+                else float(_CVSS_RANGES.get(sev, {}).get("score", 0))
+            )
+            if score > float(rule["properties"].get("security-severity", 0)):
+                rule["properties"]["security-severity"] = f"{score:.1f}"
+
+            fingerprint = hashlib.sha256(
+                "|".join([rule_id, finding.url or "", finding.parameter or "", finding.title or ""]).encode()
+            ).hexdigest()
+
+            message = finding.title
+            if finding.parameter:
+                message += f" (parameter: {finding.parameter})"
+            if finding.evidence:
+                message += f". Evidence: {finding.evidence[:500]}"
+
+            properties: Dict[str, Any] = {
+                "severity": sev,
+                "confidence": finding.confidence.value,
+            }
+            for key in ("cvss_score", "cvss_vector", "parameter", "payload"):
+                value = getattr(finding, key)
+                if value is not None:
+                    properties[key] = value
+
+            results.append({
+                "ruleId": rule_id,
+                "level": _SARIF_LEVELS.get(sev, "note"),
+                "message": {"text": message},
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": finding.url or self.target}}}],
+                "partialFingerprints": {"vortexdast/v1": fingerprint},
+                "properties": properties,
+            })
+
+        return {
+            "$schema": _SARIF_SCHEMA,
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {"driver": {
+                    "name": "VortexDAST",
+                    "version": "1.0.0",
+                    "rules": list(rules.values()),
+                }},
+                "invocations": [{
+                    "executionSuccessful": True,
+                    "properties": {"target": self.target, **{k: str(v) for k, v in self.scan_meta.items()}},
+                }],
+                "results": results,
+            }],
+        }
+
+    def save_sarif(self, path: str) -> None:
+        """Write a SARIF 2.1.0 report to ``path``."""
+        _ensure_dir(path)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(self.to_sarif(), fh, indent=2, ensure_ascii=False)
+        self._console.print(f"[green]✔[/green] SARIF report saved → [cyan]{path}[/cyan]")
+
     def save(self, path: str) -> None:
         """
         Dispatch to the appropriate save method based on file extension.
 
-        Supports ``.json``, ``.md`` / ``.markdown``, and ``.html`` / ``.htm`` extensions.
+        Supports ``.json``, ``.sarif``, ``.md`` / ``.markdown``, and ``.html`` / ``.htm`` extensions.
         Falls back to JSON for unrecognised extensions.
 
         Parameters
@@ -447,6 +548,8 @@ class Reporter:
             self.save_markdown(path)
         elif ext in {".html", ".htm"}:
             self.save_html(path)
+        elif ext == ".sarif" or path.lower().endswith(".sarif.json"):
+            self.save_sarif(path)
         else:
             self.save_json(path)
 
