@@ -276,8 +276,8 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 
 #### 3.3.2 HTML Report Improvements
 - [ ] Add request/response replay viewer (browser DevTools-style)
-- [ ] Interactive finding filtering (by severity, type, confidence)
-- [ ] Remediation snippets per finding (e.g., "fix this SQLi with parameterized queries")
+- [x] Interactive finding filtering — severity buttons + search already existed; confidence and module dropdowns (with counts) added 2026-10-07, verified in headless Chrome incl. 390px mobile width
+- [x] Remediation snippets per finding — already present: every module sets `remediation`, rendered in a "Remediation Guidance" box
 - [ ] Timeline graph of scan progress
 - **Files:** `core/reporter.py` (template updates)
 - **Effort:** 2–3 days

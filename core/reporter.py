@@ -771,7 +771,7 @@ class Reporter:
                 escaped_haystack = html.escape(haystack)
 
                 card_html = f"""
-        <div class="finding-card" data-severity="{f_sev}" data-search-text="{escaped_haystack}">
+        <div class="finding-card" data-severity="{f_sev}" data-confidence="{finding.confidence.value}" data-module="{f_module}" data-search-text="{escaped_haystack}">
           <div class="card-header" onclick="toggleCard(this)">
             <div class="header-left">
               <span class="badge {f_sev}">{f_sev.upper()}</span>
@@ -804,6 +804,21 @@ class Reporter:
                 cards_html_list.append(card_html)
 
         cards_str = "\n".join(cards_html_list)
+
+        conf_counts = {c: 0 for c in CONFIDENCE_ORDER}
+        module_counts: Dict[str, int] = {}
+        for finding in self.findings:
+            conf_counts[finding.confidence.value] = conf_counts.get(finding.confidence.value, 0) + 1
+            mod = str(finding.extra.get("module", "N/A")) if isinstance(finding.extra, dict) else "N/A"
+            module_counts[mod] = module_counts.get(mod, 0) + 1
+        confidence_options = "".join(
+            f'<option value="{c}">{c.capitalize()} ({conf_counts[c]})</option>'
+            for c in CONFIDENCE_ORDER if conf_counts.get(c)
+        )
+        module_options = "".join(
+            f'<option value="{html.escape(m)}">{html.escape(m)} ({n})</option>'
+            for m, n in sorted(module_counts.items())
+        )
 
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1007,6 +1022,18 @@ class Reporter:
       cursor: pointer;
       transition: all 0.2s;
     }}
+    .filter-selects {{ display: flex; flex-wrap: wrap; gap: 0.5rem; }}
+    .filter-select {{
+      background: #0f172a;
+      color: var(--text-main);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      padding: 0.45rem 0.6rem;
+      font: inherit;
+      font-size: 0.85rem;
+      max-width: 100%;
+      cursor: pointer;
+    }}
     .btn-filter:hover {{ color: var(--text-main); border-color: var(--text-muted); }}
     .btn-filter.active {{ background: var(--accent); color: #ffffff; border-color: var(--accent); }}
 
@@ -1206,6 +1233,14 @@ class Reporter:
         <button class="btn-filter" onclick="setSeverityFilter('low', this)">Low ({c_low})</button>
         <button class="btn-filter" onclick="setSeverityFilter('informational', this)">Info ({c_info})</button>
       </div>
+      <div class="filter-selects">
+        <select id="confidence-filter" class="filter-select" aria-label="Filter by confidence" onchange="filterFindings()">
+          <option value="all">All confidence</option>{confidence_options}
+        </select>
+        <select id="module-filter" class="filter-select" aria-label="Filter by module" onchange="filterFindings()">
+          <option value="all">All modules</option>{module_options}
+        </select>
+      </div>
       <div class="controls-right">
         <button class="btn-toggle-all" onclick="toggleAll(true)">Expand All</button>
         <button class="btn-toggle-all" onclick="toggleAll(false)">Collapse All</button>
@@ -1259,6 +1294,10 @@ class Reporter:
       const searchInput = document.getElementById('search-input');
       const searchVal = searchInput ? searchInput.value.toLowerCase().trim() : '';
       const cards = document.querySelectorAll('.finding-card');
+      const confSel = document.getElementById('confidence-filter');
+      const modSel = document.getElementById('module-filter');
+      const confVal = confSel ? confSel.value : 'all';
+      const modVal = modSel ? modSel.value : 'all';
       let visibleCount = 0;
 
       cards.forEach(card => {{
@@ -1267,8 +1306,10 @@ class Reporter:
 
         const matchesSev = (currentSeverityFilter === 'all' || cardSev === currentSeverityFilter);
         const matchesSearch = (!searchVal || searchText.includes(searchVal));
+        const matchesConf = (confVal === 'all' || card.getAttribute('data-confidence') === confVal);
+        const matchesMod = (modVal === 'all' || card.getAttribute('data-module') === modVal);
 
-        if (matchesSev && matchesSearch) {{
+        if (matchesSev && matchesSearch && matchesConf && matchesMod) {{
           card.style.display = 'block';
           visibleCount++;
         }} else {{
