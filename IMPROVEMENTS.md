@@ -164,6 +164,8 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 **Priority New Modules (recommended order):**
 
 #### 3.1.1 Template Injection Module
+**Status:** ✅ Done (2026-10-08) — `modules/template_injection.py` (`template_injection`). Injects benign arithmetic polyglots (Jinja2/Twig/Nunjucks, FreeMarker/Thymeleaf, Velocity, Smarty/Mako, ERB/EJS, Razor) into GET params and POST form fields. Reports HIGH/`firm` only when the engine returns the *computed* product (marker-wrapped `191*7=1337`) and it is absent from the baseline; literal un-evaluated reflection is ignored to avoid overlap with XSS false positives. 11 unit tests. **Not done:** header injection vectors, and logic-less engines (Handlebars) which don't evaluate arithmetic.
+
 **File:** `modules/template_injection.py`
 - Detect Jinja2, Handlebars, Django, ERB payloads
 - Test in query parameters, form fields, headers
@@ -171,6 +173,8 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 - **Effort:** 2–3 days
 
 #### 3.1.2 NoSQL Injection Module
+**Status:** ✅ Done (2026-10-08) — `modules/nosql_check.py` (`nosql_check`). Two signals: (1) error-based — appends boundary strings to a value and matches new MongoDB/CouchDB/generic parser errors → HIGH/`firm`; (2) operator-injection differential — rewrites the parameter key into `param[$ne]` (always-true) vs `param[$eq]` (always-false) and flags a significant response-length delta that also differs from the baseline → MEDIUM/`tentative`. Only comparison operators are sent (no `$where`/`$out`/mutating ops). 11 unit tests. **Not done:** Firebase-specific patterns, JSON-body (`application/json`) operator injection.
+
 **File:** `modules/nosql_check.py`
 - MongoDB, CouchDB, Firebase payload patterns
 - JSON/BSON injection into query parameters

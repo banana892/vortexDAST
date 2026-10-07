@@ -1,0 +1,67 @@
+{
+  "meta": {
+    "description": "Benign NoSQL injection probes for MongoDB / CouchDB / generic document stores. Operator probes test query-logic bypass via parameter-operator injection (e.g. param[$ne]=); boundary probes elicit NoSQL parser/driver error messages. No destructive operators ($where with code, $out, dropDatabase, etc.) are ever sent.",
+    "usage": "Operator probes replace the parameter KEY (user -> user[$ne]). Boundary probes append to the parameter VALUE and the response is matched against the error patterns below.",
+    "safe": true,
+    "references": [
+      "https://owasp.org/www-community/attacks/NoSQL_injection",
+      "https://portswigger.net/web-security/nosql-injection"
+    ]
+  },
+  "boundary_probes": [
+    { "id": "nosql_quote_brace", "value": "'\"{" },
+    { "id": "nosql_close_object", "value": "\"})" },
+    { "id": "nosql_backslash", "value": "'\\" }
+  ],
+  "operator_probes": [
+    {
+      "id": "nosql_ne_true",
+      "operator": "$ne",
+      "value": "vtxNoSQLvalueThatDoesNotExist",
+      "logic": "true",
+      "description": "$ne to a random value matches every document (always-true)."
+    },
+    {
+      "id": "nosql_eq_false",
+      "operator": "$eq",
+      "value": "vtxNoSQLvalueThatDoesNotExist",
+      "logic": "false",
+      "description": "$eq to a random value matches no document (always-false)."
+    }
+  ],
+  "nosql_error_patterns": {
+    "patterns": {
+      "MongoDB": [
+        "MongoError",
+        "MongoServerError",
+        "MongoNetworkError",
+        "E11000 duplicate key",
+        "unknown operator",
+        "FailedToParse",
+        "BadValue",
+        "\\$where",
+        "CastError",
+        "Cannot read propert(?:y|ies) of",
+        "ObjectParameterError"
+      ],
+      "CouchDB": [
+        "query_parse_error",
+        "\"error\":\"(?:bad_request|query_parse_error)\"",
+        "invalid UTF-8 JSON"
+      ],
+      "Generic": [
+        "SyntaxError: Unexpected token",
+        "JSON\\.parse",
+        "unexpected end of (?:JSON|input)"
+      ]
+    }
+  },
+  "false_positive_filter": {
+    "baseline_error_indicators": [
+      "mongoerror",
+      "query_parse_error",
+      "casterror",
+      "failedtoparse"
+    ]
+  }
+}
