@@ -1,0 +1,41 @@
+# Example VortexDAST workflow — DAST scan with SARIF upload to GitHub Code Scanning.
+#
+# Manual-trigger only (workflow_dispatch) so it never runs unattended against an
+# unintended target. Supply the target URL when you run it. Only scan targets you
+# are authorised to test.
+name: VortexDAST Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target base URL to scan"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF
+
+jobs:
+  dast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install VortexDAST
+        run: pip install -e .
+
+      - name: Run scan
+        # Exit code 2 = HIGH/CRITICAL findings. Keep the job green so the SARIF
+        # upload still runs; the Code Scanning alerts carry the signal.
+        run: vortex -u "${{ inputs.target }}" -o results.sarif || true
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif

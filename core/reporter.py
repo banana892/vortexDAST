@@ -29,6 +29,7 @@ import html
 import json
 import os
 import re
+import shlex
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -473,6 +474,31 @@ class Reporter:
             fh.write(content)
         self._console.print(f"[green]✔[/green] HTML report saved → [cyan]{path}[/cyan]")
 
+    def save_pdf(self, path: str) -> None:
+        """
+        Render the HTML report to a PDF at ``path`` using WeasyPrint.
+
+        WeasyPrint is an optional dependency; a clear error is raised (the scan
+        is never aborted elsewhere) if it is not installed.
+
+        Parameters
+        ----------
+        path : str
+            Destination file path (should end with ``.pdf``).
+        """
+        try:
+            from weasyprint import HTML  # noqa: PLC0415 — optional dependency
+        except ImportError as exc:  # pragma: no cover - depends on environment
+            raise RuntimeError(
+                "PDF export requires WeasyPrint. Install it with "
+                "`pip install weasyprint` (see its docs for system libraries)."
+            ) from exc
+
+        _ensure_dir(path)
+        html_content = self._render_html()
+        HTML(string=html_content).write_pdf(path)
+        self._console.print(f"[green]✔[/green] PDF report saved → [cyan]{path}[/cyan]")
+
     def to_sarif(self) -> Dict[str, Any]:
         """Serialise findings as a SARIF 2.1.0 log (GitHub code scanning, IDEs, CI tooling)."""
         rules: Dict[str, Dict[str, Any]] = {}
@@ -557,7 +583,7 @@ class Reporter:
         """
         Dispatch to the appropriate save method based on file extension.
 
-        Supports ``.json``, ``.sarif``, ``.md`` / ``.markdown``, and ``.html`` / ``.htm`` extensions.
+        Supports ``.json``, ``.sarif``, ``.md`` / ``.markdown``, ``.html`` / ``.htm``, and ``.pdf`` extensions.
         Falls back to JSON for unrecognised extensions.
 
         Parameters
@@ -570,6 +596,8 @@ class Reporter:
             self.save_markdown(path)
         elif ext in {".html", ".htm"}:
             self.save_html(path)
+        elif ext == ".pdf":
+            self.save_pdf(path)
         elif ext == ".sarif" or path.lower().endswith(".sarif.json"):
             self.save_sarif(path)
         else:
@@ -770,6 +798,8 @@ class Reporter:
                 haystack = f"{finding.id} {finding.title} {finding.url} {finding.parameter or ''} {finding.description or ''} {finding.evidence or ''} {f_module}".lower()
                 escaped_haystack = html.escape(haystack)
 
+                f_repro = html.escape(_build_repro_curl(finding))
+
                 card_html = f"""
         <div class="finding-card" data-severity="{f_sev}" data-confidence="{finding.confidence.value}" data-module="{f_module}" data-search-text="{escaped_haystack}">
           <div class="card-header" onclick="toggleCard(this)">
@@ -799,6 +829,8 @@ class Reporter:
             {f'<div class="section-title">Description</div><p class="description-text">{f_desc}</p>' if f_desc else ''}
             {f'<div class="section-title">Observed Evidence</div><pre><code>{f_evidence}</code></pre>' if f_evidence else ''}
             {f'<div class="remediation-box"><div class="section-title" style="margin-top:0;">Remediation Guidance</div><p>{f_rem}</p></div>' if f_rem else ''}
+            <div class="section-title">Reproduce (curl)</div>
+            <pre class="repro"><code>{f_repro}</code><button class="copy-btn" onclick="copyRepro(this)">Copy</button></pre>
           </div>
         </div>"""
                 cards_html_list.append(card_html)
@@ -1148,6 +1180,20 @@ class Reporter:
       margin-top: 1rem;
       font-size: 0.9rem;
     }}
+    pre.repro {{ position: relative; }}
+    pre.repro .copy-btn {{
+      position: absolute;
+      top: 0.4rem;
+      right: 0.4rem;
+      font-size: 0.72rem;
+      padding: 0.2rem 0.55rem;
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      background: transparent;
+      color: var(--accent);
+      cursor: pointer;
+    }}
+    pre.repro .copy-btn:hover {{ background: var(--accent); color: #fff; }}
     .empty-state {{
       text-align: center;
       padding: 3rem;
@@ -1273,6 +1319,16 @@ class Reporter:
       if (card) card.classList.toggle('open');
     }}
 
+    function copyRepro(btn) {{
+      const code = btn.parentElement.querySelector('code');
+      if (!code) return;
+      navigator.clipboard.writeText(code.innerText).then(() => {{
+        const prev = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(() => {{ btn.textContent = prev; }}, 1500);
+      }}).catch(() => {{ btn.textContent = 'Copy failed'; }});
+    }}
+
     function toggleAll(expand) {{
       const cards = document.querySelectorAll('.finding-card');
       cards.forEach(card => {{
@@ -1347,3 +1403,23 @@ def _ensure_dir(path: str) -> None:
     """Create parent directories for ``path`` if they do not already exist."""
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
+
+
+def _build_repro_curl(finding: Finding) -> str:
+    """
+    Build a copy-pasteable ``curl`` command that re-issues the request behind a
+    finding, so an analyst can replay it. Components are shell-quoted.
+    """
+    method = "GET"
+    if isinstance(finding.extra, dict):
+        method = str(finding.extra.get("method", "GET")).upper()
+
+    parts: List[str] = ["curl", "-sS"]
+    if method == "POST":
+        parts += ["-X", "POST", finding.url]
+        if finding.parameter and finding.payload is not None:
+            parts += ["--data", f"{finding.parameter}={finding.payload}"]
+    else:
+        parts += [finding.url or ""]
+
+    return " ".join(shlex.quote(p) for p in parts)

@@ -228,17 +228,18 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 **Optimizations:**
 
 #### 3.2.1 Incremental Scan Mode
-- [ ] Cache crawl results with timestamp + target hash
-- [ ] Add `--incremental` flag to skip re-crawl if recent cache exists
-- [ ] Invalidate cache on URL pattern changes (`--excluded-paths`)
-- **Files:** `core/crawler.py`, `scanner.py`
+**Status:** ✅ Done (2026-10-08) — `core/crawl_cache.py` + `--incremental` / `--cache-file` / `--cache-ttl`. The crawl is serialized to JSON (keyed by a hash of target + max_depth + max_endpoints + scope) after every run; `--incremental` reuses it when the key matches and it is within TTL (default 24h). A changed target/scope or an expired entry invalidates it. 9 unit tests.
+- [x] Cache crawl results with timestamp + target hash
+- [x] Add `--incremental` flag to skip re-crawl if recent cache exists
+- [x] Invalidate cache on scope/target change (key hash); **not done:** granular `--excluded-paths` partial invalidation
+- **Files:** `core/crawl_cache.py`, `scanner.py`
 - **Effort:** 1–2 days
 
 #### 3.2.2 Endpoint Grouping & Batch Analysis
-- [ ] Group endpoints by domain/path prefix
-- [ ] Send related probes in parallel (e.g., XSS on 5 endpoints in parallel)
-- [ ] Aggregate results by injection point type
-- **Files:** `scanner.py` (orchestrator logic)
+**Status:** ✅ Done (2026-10-08) — `core/endpoint_group.py` + `--group-endpoints`. Collapses endpoints sharing a structural signature (scheme+host+path + sorted query-param names + form signature) to one representative, so value-only duplicates (`/item?id=1..500`) are probed once. Per-module probing across endpoints was already parallel via the orchestrator's ThreadPoolExecutor. 5 unit tests.
+- [x] Group endpoints by structural signature (path + param-name set + forms)
+- [x] Probes already run in parallel across endpoints (existing ThreadPoolExecutor)
+- **Files:** `core/endpoint_group.py`, `scanner.py`
 - **Effort:** 2–3 days
 
 #### 3.2.3 HTTP Session Reuse
@@ -281,24 +282,27 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 - **Effort:** 2 days
 
 #### 3.3.2 HTML Report Improvements
-- [ ] Add request/response replay viewer (browser DevTools-style)
+- [x] Request replay — per-finding "Reproduce (curl)" block (shell-quoted, with a copy button) added 2026-10-08. A full request/response DevTools-style viewer is **not done** (would need modules to capture raw request/response pairs).
 - [x] Interactive finding filtering — severity buttons + search already existed; confidence and module dropdowns (with counts) added 2026-10-07, verified in headless Chrome incl. 390px mobile width
 - [x] Remediation snippets per finding — already present: every module sets `remediation`, rendered in a "Remediation Guidance" box
-- [ ] Timeline graph of scan progress
+- [ ] Timeline graph of scan progress — **deferred:** requires per-finding timing instrumentation that is not currently collected
 - **Files:** `core/reporter.py` (template updates)
 - **Effort:** 2–3 days
 
 #### 3.3.3 PDF Export
-- [ ] Generate PDF from HTML template (using WeasyPrint)
-- [ ] Suitable for executive summaries + offline sharing
-- **Files:** `core/reporter.py`, add `weasyprint` dependency
+**Status:** ✅ Done (2026-10-08) — `Reporter.save_pdf()` renders the HTML report to PDF via WeasyPrint; `-o report.pdf` dispatches to it. WeasyPrint is an optional dependency (clear error if missing). 2 unit tests.
+- [x] Generate PDF from HTML template (using WeasyPrint)
+- [x] Suitable for executive summaries + offline sharing
+- **Files:** `core/reporter.py`
 - **Effort:** 1 day
 
 #### 3.3.4 Integration with Defect Tracking
-- [ ] Export findings to Jira tickets (with credentials)
-- [ ] Auto-create GitHub issues from scan results
-- [ ] Slack/webhook notifications on high-severity findings
-- **File:** `core/reporter.py` (add export adapters)
+**Status:** ✅ Done (2026-10-08) — webhook summary (`--webhook` + `--webhook-format json|slack`, `core/notify.py`) **plus** issue-tracker export (`core/issue_tracker.py`): `--github-repo` (needs `GITHUB_TOKEN`) and `--jira-url`/`--jira-user`/`--jira-project` (needs `JIRA_API_TOKEN`), filtered by `--issue-min-severity`. Issues carry a stable fingerprint marker for best-effort dedup across runs; GitHub export skips already-filed issues via search. 9 webhook + 10 issue-tracker unit tests (mocked HTTP; no live calls).
+
+- [x] Export findings to Jira tickets (with credentials)
+- [x] Auto-create GitHub issues from scan results
+- [x] Slack/webhook notifications on findings
+- **Files:** `core/notify.py`, `core/issue_tracker.py`, `scanner.py`
 - **Effort:** 3–4 days
 
 **Total Effort:** 8–10 days
@@ -307,33 +311,12 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 
 ### 3.4 Better Documentation & Payloads
 
-**Current State:** README.md + inline docstrings; payload files minimal
+**Status:** ✅ Done (2026-10-08) — all four guides written.
 
-**Improvements:**
-
-- [ ] **Payload Documentation**
-  - Document each payload file: why it's included, false positive rates, source
-  - `payloads/README.md` with table of payload sets + usage
-  - **Effort:** 1 day
-
-- [ ] **Module Developer Guide**
-  - Template for writing new scanner modules
-  - Common patterns: canary injection, response diffing, signature matching
-  - **File:** `docs/MODULE_DEVELOPMENT.md`
-  - **Effort:** 1–2 days
-
-- [ ] **Scanning Methodology Guide**
-  - How to interpret findings (CONFIRMED vs. PLAUSIBLE)
-  - Manual exploitation techniques per finding type
-  - **File:** `docs/SCANNING_GUIDE.md`
-  - **Effort:** 2 days
-
-- [ ] **Integration Guides**
-  - GitHub Actions workflow
-  - GitLab CI/CD pipeline
-  - Jenkins integration
-  - **Files:** `.github/workflows/scan.yml`, etc.
-  - **Effort:** 2–3 days
+- [x] **Payload Documentation** — `payloads/README.md`: table of every payload set, its module, purpose, and false-positive notes; schema conventions and extension steps.
+- [x] **Module Developer Guide** — `docs/MODULE_DEVELOPMENT.md`: skeleton, the `run()` contract, detection patterns (baseline/diff, marker reflection, differential), severity/confidence, payload + test conventions.
+- [x] **Scanning Methodology Guide** — `docs/SCANNING_GUIDE.md`: how to run, confidence-level interpretation, how each finding type is reached and confirmed, FP reduction, output formats.
+- [x] **Integration Guides** — `.github/workflows/scan.yml` (manual-trigger scan + SARIF upload) and `docs/CICD_INTEGRATION.md` (GitHub Actions, GitLab CI, Jenkins, Jira/GitHub issue export).
 
 **Total Effort:** 6–8 days
 

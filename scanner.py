@@ -49,6 +49,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple, Type
+from urllib.parse import urlsplit
 
 import yaml
 from rich.console import Console
@@ -68,7 +69,10 @@ _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from core import crawl_cache
 from core.crawler import CrawlResult, CrawledEndpoint, Crawler
+from core.endpoint_group import group_endpoints
+from core.notify import WEBHOOK_FORMATS, build_payload, send_webhook
 from core.filters import SEVERITY_ORDER, FilterConfigError, FindingFilter, load_suppression_rules
 from core.reporter import Reporter
 from core.requester import Requester
@@ -519,7 +523,83 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output", "-o",
         default=None,
         metavar="FILE",
-        help="Output file for the scan report (.json, .sarif, .md, or .html). If omitted, terminal output only.",
+        help="Output file for the scan report (.json, .sarif, .md, .html, or .pdf). If omitted, terminal output only.",
+    )
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help=(
+            "Reuse a recent cached crawl for this target/scope instead of re-crawling. "
+            "The crawl is cached after each run; a changed target or scope invalidates it."
+        ),
+    )
+    parser.add_argument(
+        "--cache-file",
+        default=None,
+        metavar="FILE",
+        help="Path to the crawl cache file (default: .vortex_crawl_cache.json).",
+    )
+    parser.add_argument(
+        "--cache-ttl",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Maximum age of a crawl cache entry to reuse, in seconds (default: 86400).",
+    )
+    parser.add_argument(
+        "--group-endpoints",
+        action="store_true",
+        default=False,
+        help=(
+            "Collapse structurally-identical endpoints (same path + parameter names) "
+            "to one representative before fuzzing, to speed up large scans."
+        ),
+    )
+    parser.add_argument(
+        "--github-repo",
+        default=None,
+        metavar="OWNER/REPO",
+        help="Create a GitHub issue per finding (needs GITHUB_TOKEN in the environment).",
+    )
+    parser.add_argument(
+        "--jira-url",
+        default=None,
+        metavar="URL",
+        help="Jira base URL for issue export (needs --jira-user, --jira-project, JIRA_API_TOKEN).",
+    )
+    parser.add_argument(
+        "--jira-user",
+        default=None,
+        metavar="EMAIL",
+        help="Jira account email for API auth (pair with --jira-url).",
+    )
+    parser.add_argument(
+        "--jira-project",
+        default=None,
+        metavar="KEY",
+        help="Jira project key for created issues (e.g. SEC).",
+    )
+    parser.add_argument(
+        "--issue-min-severity",
+        choices=SEVERITY_ORDER,
+        default="high",
+        help="Minimum severity to export as a tracker issue. Default: high.",
+    )
+    parser.add_argument(
+        "--webhook",
+        default=None,
+        metavar="URL",
+        help=(
+            "POST a scan summary (severity counts + finding titles/URLs, no evidence) to this "
+            "URL when the scan finishes. Sent without the target's cookies, auth headers, or proxy."
+        ),
+    )
+    parser.add_argument(
+        "--webhook-format",
+        choices=WEBHOOK_FORMATS,
+        default="json",
+        help="Webhook body: 'json' (structured summary) or 'slack' (incoming-webhook text). Default: json.",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -645,6 +725,11 @@ def run_scan(args: argparse.Namespace) -> int:
         logger.error("Invalid finding filter: %s", exc)
         return 1
 
+    webhook = getattr(args, "webhook", None)
+    if webhook and urlsplit(webhook).scheme not in ("http", "https"):
+        logger.error("--webhook must be an http:// or https:// URL.")
+        return 1
+
     # ── Load configuration ─────────────────────────────────────────────────
     config = _load_config(args.config)
     req_cfg = config.get("requester", {})
@@ -744,41 +829,62 @@ def run_scan(args: argparse.Namespace) -> int:
             except BaseException as exc:  # noqa: BLE001
                 _crawl_exc.append(exc)
 
-        crawl_thread = threading.Thread(target=_do_crawl, daemon=True)
-
-        with Progress(
-            SpinnerColumn(spinner_name="bouncingBar"),
-            TextColumn("{task.description}"),
-            console=console,
-            transient=True,
-        ) as crawl_progress:
-            crawl_task = crawl_progress.add_task(
-                f"[bold cyan]Phase 1 — Crawling[/bold cyan]  "
-                f"[dim]{args.target}[/dim]  [dim](depth ≤ {max_depth})[/dim]",
-                total=None,  # indeterminate – we don't know the URL count upfront
-            )
-            crawl_thread.start()
-
-            while crawl_thread.is_alive():
-                discovered = len(crawl_result.endpoints) if crawl_result else 0
-                crawl_progress.update(
-                    crawl_task,
-                    description=(
-                        f"[bold cyan]Phase 1 — Crawling[/bold cyan]  "
-                        f"[dim]{args.target}[/dim]  "
-                        f"[green]{discovered}[/green] URL(s) found…"
-                    ),
+        # ── Incremental scan: try a cached crawl before spidering ─────────
+        _cache_path = args.cache_file or crawl_cache.DEFAULT_CACHE_PATH
+        _cache_key = crawl_cache.cache_key(
+            args.target,
+            {"max_depth": max_depth, "max_endpoints": max_endpoints, "scope": scope_cfg},
+        )
+        if args.incremental:
+            _ttl = args.cache_ttl if args.cache_ttl is not None else crawl_cache.DEFAULT_TTL_SECONDS
+            cached = crawl_cache.load_cache(_cache_path, _cache_key, ttl_seconds=_ttl)
+            if cached is not None:
+                crawl_result = cached
+                console.print(
+                    f"  [bold green]✓[/bold green] Reusing cached crawl — "
+                    f"[bold]{len(cached.endpoints)}[/bold] endpoint(s) "
+                    f"[dim](--incremental)[/dim]"
                 )
-                time.sleep(0.25)
-
-            crawl_thread.join()
-
-        # Re-raise any exception from the crawl thread.
-        if _crawl_exc:
-            raise _crawl_exc[0]
 
         if crawl_result is None:
-            raise RuntimeError("Crawl produced no result — unexpected state.")
+            crawl_thread = threading.Thread(target=_do_crawl, daemon=True)
+
+            with Progress(
+                SpinnerColumn(spinner_name="bouncingBar"),
+                TextColumn("{task.description}"),
+                console=console,
+                transient=True,
+            ) as crawl_progress:
+                crawl_task = crawl_progress.add_task(
+                    f"[bold cyan]Phase 1 — Crawling[/bold cyan]  "
+                    f"[dim]{args.target}[/dim]  [dim](depth ≤ {max_depth})[/dim]",
+                    total=None,  # indeterminate – we don't know the URL count upfront
+                )
+                crawl_thread.start()
+
+                while crawl_thread.is_alive():
+                    discovered = len(crawl_result.endpoints) if crawl_result else 0
+                    crawl_progress.update(
+                        crawl_task,
+                        description=(
+                            f"[bold cyan]Phase 1 — Crawling[/bold cyan]  "
+                            f"[dim]{args.target}[/dim]  "
+                            f"[green]{discovered}[/green] URL(s) found…"
+                        ),
+                    )
+                    time.sleep(0.25)
+
+                crawl_thread.join()
+
+            # Re-raise any exception from the crawl thread.
+            if _crawl_exc:
+                raise _crawl_exc[0]
+
+            if crawl_result is None:
+                raise RuntimeError("Crawl produced no result — unexpected state.")
+
+            # Persist the fresh crawl so a later --incremental run can reuse it.
+            crawl_cache.save_cache(_cache_path, _cache_key, crawl_result)
 
         console.print(
             f"  [bold green]✓[/bold green] Crawl complete — "
@@ -800,6 +906,18 @@ def run_scan(args: argparse.Namespace) -> int:
         # ── Endpoint list ─────────────────────────────────────────────────
         # max_endpoints is now enforced inside Crawler — no post-crawl slice.
         endpoints = crawl_result.endpoints
+
+        # ── Optional: collapse structurally-identical endpoints ───────────
+        if args.group_endpoints and endpoints:
+            grouping = group_endpoints(endpoints)
+            if grouping.collapsed > 0:
+                console.print(
+                    f"  [bold cyan]⇄[/bold cyan] Grouped endpoints — "
+                    f"[bold]{len(endpoints)}[/bold] → [bold]{grouping.groups}[/bold] "
+                    f"distinct attack surface(s) "
+                    f"[dim]({grouping.collapsed} collapsed)[/dim]"
+                )
+            endpoints = grouping.representatives
 
         # ── Phase 3 & 4: Run scanner modules (live progress bar) ──────────
         # Build module instances.  XSSCheckModule accepts a use_threads kwarg
@@ -941,10 +1059,60 @@ def run_scan(args: argparse.Namespace) -> int:
     if args.output:
         reporter.save(args.output)
 
-    # Exit code semantics for CI/CD pipelines.
-    if any(f.severity.value in ("critical", "high") for f in kept_findings):
-        return 2  # Findings of HIGH or CRITICAL severity detected.
-    return 0
+    # Exit 2 = HIGH/CRITICAL findings, for CI pipelines that gate on results.
+    exit_code = 2 if any(f.severity.value in ("critical", "high") for f in kept_findings) else 0
+
+    if webhook:
+        send_webhook(
+            webhook,
+            build_payload(kept_findings, args.target, args.webhook_format, exit_code, scan_meta),
+        )
+
+    _export_issues(args, kept_findings, console)
+
+    return exit_code
+
+
+def _export_issues(
+    args: argparse.Namespace,
+    findings: List[Finding],
+    console: Console,
+) -> None:
+    """Create GitHub / Jira issues for findings, if a tracker is configured."""
+    if not (args.github_repo or args.jira_url):
+        return
+
+    from core import issue_tracker  # noqa: PLC0415 — only needed when exporting
+
+    if args.github_repo:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            logger.error("--github-repo set but GITHUB_TOKEN is not in the environment.")
+        else:
+            session = issue_tracker.github_session(token)
+            res = issue_tracker.export_to_github(
+                session, args.github_repo, findings, args.issue_min_severity
+            )
+            console.print(
+                f"  [bold green]✓[/bold green] GitHub: created {res.total_created} issue(s), "
+                f"skipped {res.skipped}, failed {res.failed}."
+            )
+
+    if args.jira_url:
+        token = os.environ.get("JIRA_API_TOKEN")
+        if not (args.jira_user and args.jira_project and token):
+            logger.error(
+                "--jira-url needs --jira-user, --jira-project, and JIRA_API_TOKEN in the environment."
+            )
+        else:
+            session = issue_tracker.jira_session(args.jira_user, token)
+            res = issue_tracker.export_to_jira(
+                session, args.jira_url, args.jira_project, findings, args.issue_min_severity
+            )
+            console.print(
+                f"  [bold green]✓[/bold green] Jira: created {res.total_created} issue(s), "
+                f"failed {res.failed}."
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -184,3 +184,20 @@ security-scan:
 
 Only scan targets you own or are authorised to test.
 
+## 6. Webhook Notifications
+
+`--webhook URL` posts a summary when the scan finishes; `--webhook-format slack` sends a Slack
+incoming-webhook message instead of the default structured JSON.
+
+- Contains severity counts and up to 20 findings (title, severity, confidence, URL) — never
+  evidence or payloads, which can contain leaked secrets.
+- Sent with a separate HTTP client: the target's `--cookie`, `--header`, basic-auth, and
+  `--proxy` settings are not applied to it.
+- A failed post logs a warning (host only — webhook URLs usually embed a token) and does not
+  change the exit code.
+
+```bash
+vortex -u https://staging.example.com --min-confidence firm \
+  --webhook "$SLACK_WEBHOOK_URL" --webhook-format slack
+```
+
