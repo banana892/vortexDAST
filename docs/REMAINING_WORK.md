@@ -7,7 +7,7 @@ the buildable parts of **Phase 4** (REST API, anomaly-detection core) are done.
 This document is a focused digest of what is *still open*, why, and what it would
 take. It excludes items already shipped.
 
-Current baseline: **529 tests passing**, **mypy clean** (31 files, gated in CI),
+Current baseline: **549 tests passing**, **mypy clean** (31 source files, gated in CI),
 **88% line coverage**, **13 scanner modules**.
 
 ---
@@ -16,12 +16,12 @@ Current baseline: **529 tests passing**, **mypy clean** (31 files, gated in CI),
 
 These extend existing, working modules — none are blockers.
 
-| Item | Module | Why it's open | Effort |
-|------|--------|---------------|--------|
-| Header injection vectors; logic-less engines (Handlebars) | `template_injection` | Arithmetic polyglots don't evaluate in logic-less engines; header vectors untested | S |
-| Firebase patterns; JSON-body (`application/json`) operator injection | `nosql_check` | Current probes target query/form params and Mongo/CouchDB | M |
-| True dual-mode crawl (auth vs no-auth endpoint-list diff); role-vs-role (vertical) checks; UUID/non-numeric object refs | `access_control_check` | Current impl is per-URL auth-strip + numeric IDOR; a full dual crawl needs crawler orchestration changes | M–L |
-| TLS protocol/cipher inspection | `transport_check` | Needs a raw TLS handshake (via `ssl`/`sslyze`), not `requests` | M |
+| Item | Module | Status | Effort |
+|------|--------|--------|--------|
+| Header injection vectors; logic-less engines (Handlebars/Mustache) | `template_injection` | **Shipped** (header vectors + logic-less engine probes) | S |
+| Firebase patterns; JSON-body (`application/json`) operator injection | `nosql_check` | **Shipped** (Firebase regexes + JSON body fuzzing) | M |
+| True dual-mode crawl (auth vs no-auth endpoint-list diff); role-vs-role (vertical) checks; UUID/non-numeric object refs | `access_control_check` | Open (needs crawler orchestration changes) | M–L |
+| TLS protocol/cipher inspection | `transport_check` | **Shipped** (raw TLS handshake via stdlib `ssl`) | M |
 
 ---
 
@@ -48,22 +48,22 @@ These extend existing, working modules — none are blockers.
 
 ## 4. Advanced features (Phase 4+)
 
-| Item | Status | Why it's open | Effort |
-|------|--------|---------------|--------|
+| Item | Status | Why it's open / notes | Effort |
+|------|--------|-----------------------|--------|
 | Distributed scanning (worker pool + orchestrator) | Deferred | Needs a message broker (Redis/RabbitMQ) not available in this environment. `core.engine.execute_scan` is the clean unit a worker would call | L |
-| Wire anomaly detector into the live scan pipeline | Core done | `core/anomaly.py` works standalone; needs the engine to capture per-response features (length/latency/headers) and emit findings | M |
+| Wire anomaly detector into the live scan pipeline | **Shipped** | Features collected per-endpoint and fed into `ResponseAnomalyDetector` in `core/engine.py` | M |
 | Interactive replay & debugging SPA | Deferred | A React/Vue frontend is a separate project; the REST API (`core/api.py`) is the backend it would consume | L |
-| API: persistent job storage + authentication | Open | Current job store is in-memory and unauthenticated — fine for local/single-user, **required before any shared/production exposure** | M |
+| API: persistent job storage + authentication | **Shipped** | `APIKeyMiddleware` + file-backed atomic `JobStore` in `core/api.py` | M |
 
 ---
 
 ## 5. Security & dependency hygiene (§6.3)
 
-Never started — worth doing before any release:
+Completed before release:
 
-- [ ] Add dependency scanning to CI (e.g. `pip-audit`)
-- [ ] Pin dependency versions in `requirements.txt`
-- [ ] Enable GitHub Dependabot for monthly security updates
+- [x] Add dependency scanning to CI (`pip-audit`)
+- [x] Pin dependency versions in `requirements.txt`
+- [x] Enable GitHub Dependabot for monthly security updates (`.github/dependabot.yml`)
 
 Effort: **S** (mostly CI/config).
 

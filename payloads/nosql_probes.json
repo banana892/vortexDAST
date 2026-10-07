@@ -1,11 +1,12 @@
 {
   "meta": {
-    "description": "Benign NoSQL injection probes for MongoDB / CouchDB / generic document stores. Operator probes test query-logic bypass via parameter-operator injection (e.g. param[$ne]=); boundary probes elicit NoSQL parser/driver error messages. No destructive operators ($where with code, $out, dropDatabase, etc.) are ever sent.",
-    "usage": "Operator probes replace the parameter KEY (user -> user[$ne]). Boundary probes append to the parameter VALUE and the response is matched against the error patterns below.",
+    "description": "Benign NoSQL injection probes for MongoDB / CouchDB / Firebase / generic document stores. Operator probes test query-logic bypass via parameter-operator injection (e.g. param[$ne]= or JSON body nested object); boundary probes elicit NoSQL parser/driver error messages. No destructive operators ($where with code, $out, dropDatabase, etc.) are ever sent.",
+    "usage": "Operator probes replace the parameter KEY or nest into JSON bodies. Boundary probes append to the parameter VALUE and the response is matched against error patterns.",
     "safe": true,
     "references": [
       "https://owasp.org/www-community/attacks/NoSQL_injection",
-      "https://portswigger.net/web-security/nosql-injection"
+      "https://portswigger.net/web-security/nosql-injection",
+      "https://firebase.google.com/docs/database/security"
     ]
   },
   "boundary_probes": [
@@ -29,6 +30,22 @@
       "description": "$eq to a random value matches no document (always-false)."
     }
   ],
+  "json_operator_probes": [
+    {
+      "id": "nosql_json_ne",
+      "operator": "$ne",
+      "value": "vtxNoSQLvalueThatDoesNotExist",
+      "logic": "true",
+      "description": "JSON body nested $ne operator matches all documents (always-true)."
+    },
+    {
+      "id": "nosql_json_eq",
+      "operator": "$eq",
+      "value": "vtxNoSQLvalueThatDoesNotExist",
+      "logic": "false",
+      "description": "JSON body nested $eq operator matches no documents (always-false)."
+    }
+  ],
   "nosql_error_patterns": {
     "patterns": {
       "MongoDB": [
@@ -49,6 +66,16 @@
         "\"error\":\"(?:bad_request|query_parse_error)\"",
         "invalid UTF-8 JSON"
       ],
+      "Firebase": [
+        "FirebaseError",
+        "PERMISSION_DENIED",
+        "firebase(?:-admin|\\.database|\\.firestore)?",
+        "7 PERMISSION_DENIED",
+        "Missing or insufficient permissions",
+        "INVALID_ARGUMENT",
+        "Database Error",
+        "Error: value for argument"
+      ],
       "Generic": [
         "SyntaxError: Unexpected token",
         "JSON\\.parse",
@@ -61,7 +88,9 @@
       "mongoerror",
       "query_parse_error",
       "casterror",
-      "failedtoparse"
+      "failedtoparse",
+      "firebase",
+      "permission_denied"
     ]
   }
 }

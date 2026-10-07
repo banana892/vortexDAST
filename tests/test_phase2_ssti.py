@@ -52,6 +52,8 @@ def _mock_response(text: str = "<html>OK</html>", status_code: int = 200) -> Mag
 def _mock_requester() -> MagicMock:
     req = MagicMock(spec=Requester)
     req.dispatch_concurrent.side_effect = lambda tasks, **kwargs: [t() for t in tasks]
+    req.get.return_value = (_mock_response(), None)
+    req.post.return_value = (_mock_response(), None)
     return req
 
 

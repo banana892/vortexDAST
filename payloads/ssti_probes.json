@@ -52,6 +52,70 @@
       "value": "vtxSSTI@(191*7)ENDvtx",
       "literal": "vtxSSTI@(191*7)ENDvtx",
       "expected": "vtxSSTI1337ENDvtx"
+    },
+    {
+      "id": "ssti_handlebars_helper",
+      "engines": ["Handlebars", "Mustache"],
+      "value": "vtxSSTI{{#with 1337}}{{this}}{{/with}}ENDvtx",
+      "literal": "vtxSSTI{{#with 1337}}{{this}}{{/with}}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx",
+      "note": "Logic-less engines: Handlebars #with passes a literal to {{this}}, no arithmetic."
+    },
+    {
+      "id": "ssti_handlebars_lookup",
+      "engines": ["Handlebars"],
+      "value": "vtxSSTI{{lookup (list 1337) 0}}ENDvtx",
+      "literal": "vtxSSTI{{lookup (list 1337) 0}}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx",
+      "note": "Handlebars lookup helper: retrieves index 0 from a constructed list."
+    },
+    {
+      "id": "ssti_pebble_curly",
+      "engines": ["Pebble"],
+      "value": "vtxSSTI{{ 191 * 7 }}ENDvtx",
+      "literal": "vtxSSTI{{ 191 * 7 }}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx",
+      "note": "Pebble Java engine uses Jinja-style {{ }} with spaces."
+    }
+  ],
+  "header_probes": [
+    {
+      "id": "ssti_header_referer_jinja",
+      "header": "Referer",
+      "engines": ["Jinja2", "Twig", "Nunjucks"],
+      "value": "vtxSSTI{{191*7}}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx",
+      "note": "Inject via Referer header — reflected by error/debug pages."
+    },
+    {
+      "id": "ssti_header_referer_freemarker",
+      "header": "Referer",
+      "engines": ["FreeMarker"],
+      "value": "vtxSSTI${191*7}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx"
+    },
+    {
+      "id": "ssti_header_ua_jinja",
+      "header": "User-Agent",
+      "engines": ["Jinja2", "Twig", "Nunjucks"],
+      "value": "vtxSSTI{{191*7}}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx",
+      "note": "Inject via User-Agent — logged and sometimes rendered in dashboards."
+    },
+    {
+      "id": "ssti_header_ua_freemarker",
+      "header": "User-Agent",
+      "engines": ["FreeMarker"],
+      "value": "vtxSSTI${191*7}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx"
+    },
+    {
+      "id": "ssti_header_xfwd_jinja",
+      "header": "X-Forwarded-For",
+      "engines": ["Jinja2", "Twig"],
+      "value": "vtxSSTI{{191*7}}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx",
+      "note": "Inject via X-Forwarded-For — apps that log/display client IP."
     }
   ]
 }

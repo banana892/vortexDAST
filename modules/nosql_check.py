@@ -106,6 +106,7 @@ class NoSQLCheckModule(BaseScannerModule):
         (
             self._boundary_probes,
             self._operator_probes,
+            self._json_operator_probes,
             self._compiled_patterns,
             self._baseline_error_indicators,
         ) = _load_nosql_probes(path)
@@ -115,7 +116,7 @@ class NoSQLCheckModule(BaseScannerModule):
     def run(self, endpoint: CrawledEndpoint) -> List[Finding]:
         findings: List[Finding] = []
 
-        if not self._boundary_probes and not self._operator_probes:
+        if not self._boundary_probes and not self._operator_probes and not self._json_operator_probes:
             logger.warning("nosql_check: no probes loaded — skipping %s", endpoint.url)
             return findings
 
@@ -129,6 +130,7 @@ class NoSQLCheckModule(BaseScannerModule):
 
         for form in endpoint.forms:
             findings.extend(self._fuzz_form(form))
+            findings.extend(self._fuzz_json_body(form))
 
         return findings
 
@@ -214,6 +216,70 @@ class NoSQLCheckModule(BaseScannerModule):
                 findings.append(op_finding)
 
         return findings
+
+    # ── JSON body fuzzing ─────────────────────────────────────────────────────
+
+    def _fuzz_json_body(self, form: ParsedForm) -> List[Finding]:
+        if not form.fields:
+            return []
+
+        findings: List[Finding] = []
+        base_body: Dict[str, Any] = {f.name: f.default_value for f in form.fields}
+
+        baseline_body, status = self._post_json_baseline(form.action_url, base_body)
+        if baseline_body is None or status in (404, 405, 415):
+            return []
+        if self._baseline_has_errors(baseline_body):
+            return []
+
+        for target_field in form.fields:
+            original_value = target_field.default_value
+
+            for probe in self._boundary_probes:
+                fuzzed = dict(base_body)
+                fuzzed[target_field.name] = original_value + probe["value"]
+                body = self._post_json_body(form.action_url, fuzzed)
+                if body is None:
+                    continue
+                finding = self._analyse_error(
+                    body, baseline_body, probe, form.action_url, target_field.name, "POST (JSON)"
+                )
+                if finding:
+                    findings.append(finding)
+                    break
+
+            op_finding = self._operator_differential_json(
+                form.action_url, base_body, target_field.name, baseline_body
+            )
+            if op_finding:
+                findings.append(op_finding)
+
+        return findings
+
+    def _operator_differential_json(
+        self,
+        url: str,
+        base_body: Dict[str, Any],
+        target_field: str,
+        baseline_body: str,
+    ) -> Optional[Finding]:
+        true_probe, false_probe = self._json_operator_pair()
+        if not true_probe or not false_probe:
+            return None
+
+        true_data = dict(base_body)
+        true_data[target_field] = {true_probe["operator"]: true_probe["value"]}
+        false_data = dict(base_body)
+        false_data[target_field] = {false_probe["operator"]: false_probe["value"]}
+
+        true_body = self._post_json_body(url, true_data)
+        false_body = self._post_json_body(url, false_data)
+        if true_body is None or false_body is None:
+            return None
+
+        return self._evaluate_operator_diff(
+            true_body, false_body, baseline_body, url, target_field, "POST (JSON)"
+        )
 
     # ── Error analysis ────────────────────────────────────────────────────────
 
@@ -396,6 +462,17 @@ class NoSQLCheckModule(BaseScannerModule):
         )
         return true_probe, false_probe
 
+    def _json_operator_pair(self) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        true_probe = next(
+            (p for p in self._json_operator_probes if p.get("logic") == "true"), None
+        )
+        false_probe = next(
+            (p for p in self._json_operator_probes if p.get("logic") == "false"), None
+        )
+        if not true_probe or not false_probe:
+            return self._operator_pair()
+        return true_probe, false_probe
+
     def _match_errors(self, body: str) -> Tuple[Optional[_CompiledPattern], str, str]:
         for compiled in self._compiled_patterns:
             match = compiled.pattern.search(body)
@@ -418,36 +495,88 @@ class NoSQLCheckModule(BaseScannerModule):
     ) -> Tuple[Optional[str], int]:
         parsed = urlparse(url)
         baseline_url = parsed._replace(query=urlencode(params)).geturl()
-        response, error = self.requester.get(baseline_url)
+        try:
+            res = self.requester.get(baseline_url)
+            if not isinstance(res, tuple) or len(res) != 2:
+                return None, 0
+            response, error = res
+        except Exception:
+            return None, 0
         if error or response is None:
             logger.debug("nosql GET baseline failed for %s: %s", baseline_url, error)
             return None, 0
-        return response.text, response.status_code
+        return getattr(response, "text", ""), getattr(response, "status_code", 0)
 
     def _get_body(self, url: str, params: Dict[str, str]) -> Optional[str]:
         parsed = urlparse(url)
         fuzzed_url = parsed._replace(query=urlencode(params)).geturl()
-        response, error = self.requester.get(fuzzed_url)
+        try:
+            res = self.requester.get(fuzzed_url)
+            if not isinstance(res, tuple) or len(res) != 2:
+                return None
+            response, error = res
+        except Exception:
+            return None
         if error or response is None:
             logger.debug("nosql GET failed for %s: %s", fuzzed_url, error)
             return None
-        return response.text
+        return getattr(response, "text", "")
 
     def _post_baseline(
         self, url: str, data: Dict[str, str]
     ) -> Tuple[Optional[str], int]:
-        response, error = self.requester.post(url, data=data)
+        try:
+            res = self.requester.post(url, data=data)
+            if not isinstance(res, tuple) or len(res) != 2:
+                return None, 0
+            response, error = res
+        except Exception:
+            return None, 0
         if error or response is None:
             logger.debug("nosql POST baseline failed for %s: %s", url, error)
             return None, 0
-        return response.text, response.status_code
+        return getattr(response, "text", ""), getattr(response, "status_code", 0)
 
     def _post_body(self, url: str, data: Dict[str, str]) -> Optional[str]:
-        response, error = self.requester.post(url, data=data)
+        try:
+            res = self.requester.post(url, data=data)
+            if not isinstance(res, tuple) or len(res) != 2:
+                return None
+            response, error = res
+        except Exception:
+            return None
         if error or response is None:
             logger.debug("nosql POST failed for %s: %s", url, error)
             return None
-        return response.text
+        return getattr(response, "text", "")
+
+    def _post_json_baseline(
+        self, url: str, json_data: Dict[str, Any]
+    ) -> Tuple[Optional[str], int]:
+        try:
+            res = self.requester.post(url, json=json_data)
+            if not isinstance(res, tuple) or len(res) != 2:
+                return None, 0
+            response, error = res
+        except Exception:
+            return None, 0
+        if error or response is None:
+            logger.debug("nosql POST (JSON) baseline failed for %s: %s", url, error)
+            return None, 0
+        return getattr(response, "text", ""), getattr(response, "status_code", 0)
+
+    def _post_json_body(self, url: str, json_data: Dict[str, Any]) -> Optional[str]:
+        try:
+            res = self.requester.post(url, json=json_data)
+            if not isinstance(res, tuple) or len(res) != 2:
+                return None
+            response, error = res
+        except Exception:
+            return None
+        if error or response is None:
+            logger.debug("nosql POST (JSON) failed for %s: %s", url, error)
+            return None
+        return getattr(response, "text", "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -457,19 +586,28 @@ class NoSQLCheckModule(BaseScannerModule):
 
 def _load_nosql_probes(
     path: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[_CompiledPattern], List[str]]:
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[_CompiledPattern],
+    List[str],
+]:
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
         logger.error("nosql_probes.json not found at %s", path)
-        return [], [], [], []
+        return [], [], [], [], []
     except json.JSONDecodeError as exc:
         logger.error("nosql_probes.json parse error: %s", exc)
-        return [], [], [], []
+        return [], [], [], [], []
 
     boundary_probes: List[Dict[str, Any]] = data.get("boundary_probes", [])
     operator_probes: List[Dict[str, Any]] = data.get("operator_probes", [])
+    json_operator_probes: List[Dict[str, Any]] = data.get(
+        "json_operator_probes", operator_probes
+    )
 
     compiled_patterns: List[_CompiledPattern] = []
     raw_patterns: Dict[str, List[str]] = (
@@ -493,7 +631,17 @@ def _load_nosql_probes(
     )
 
     logger.debug(
-        "nosql_check: loaded %d boundary, %d operator probes, %d patterns from %s",
-        len(boundary_probes), len(operator_probes), len(compiled_patterns), path,
+        "nosql_check: loaded %d boundary, %d operator, %d JSON probes, %d patterns from %s",
+        len(boundary_probes),
+        len(operator_probes),
+        len(json_operator_probes),
+        len(compiled_patterns),
+        path,
     )
-    return boundary_probes, operator_probes, compiled_patterns, baseline_indicators
+    return (
+        boundary_probes,
+        operator_probes,
+        json_operator_probes,
+        compiled_patterns,
+        baseline_indicators,
+    )

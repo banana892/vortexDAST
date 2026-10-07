@@ -8,6 +8,17 @@ no new heavyweight dependency. Scans run in a background thread pool; results
 are polled or streamed via Server-Sent Events, and an optional webhook callback
 fires on completion.
 
+Authentication
+--------------
+When the ``VORTEX_API_KEY`` environment variable is set, every request must
+include a matching ``Authorization: Bearer <key>`` header (or ``X-API-Key``
+header).  When the env var is unset, auth is disabled (local development).
+
+Storage
+-------
+By default jobs are kept in memory.  Set ``VORTEX_JOBS_DIR`` to a directory
+path to enable JSON-file-backed persistent storage that survives restarts.
+
 Endpoints
 ---------
     GET  /health                 — liveness + registered module list
@@ -29,18 +40,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import secrets
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from core.engine import ScanReport, available_modules, execute_scan
 from core.notify import build_payload, send_webhook
@@ -48,6 +64,63 @@ from core.notify import build_payload, send_webhook
 logger = logging.getLogger(__name__)
 
 _MAX_WORKERS = 4
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API-key authentication middleware
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class APIKeyMiddleware:
+    """
+    ASGI middleware that enforces Bearer-token or X-API-Key authentication.
+
+    When ``api_key`` is ``None`` (env var unset), all requests are allowed
+    (local-dev mode). Otherwise the request must carry a matching key.
+    """
+
+    # Paths that never require authentication.
+    _PUBLIC_PATHS = frozenset({"/health"})
+
+    def __init__(self, app: ASGIApp, api_key: Optional[str] = None) -> None:
+        self.app = app
+        self.api_key = api_key
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or self.api_key is None:
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path in self._PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        # Extract token from headers.
+        headers = dict(scope.get("headers", []))
+        token = _extract_token(headers)
+        if not token or not secrets.compare_digest(token, self.api_key):
+            response = JSONResponse(
+                {"error": "unauthorized", "detail": "Invalid or missing API key."},
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
+
+
+def _extract_token(headers: Dict[bytes, bytes]) -> Optional[str]:
+    """Extract API key from Authorization: Bearer or X-API-Key header."""
+    # Try Authorization: Bearer <token>
+    auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    # Try X-API-Key
+    api_key = headers.get(b"x-api-key", b"").decode("utf-8", errors="replace")
+    if api_key:
+        return api_key.strip()
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,7 +150,7 @@ class ScanRequest(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Job store
+# Job store — in-memory with optional JSON-file persistence
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -106,27 +179,82 @@ class ScanJob:
 
 
 class JobStore:
-    """Thread-safe in-memory job registry."""
+    """Thread-safe in-memory job registry with optional file persistence."""
 
-    def __init__(self) -> None:
+    def __init__(self, persist_dir: Optional[str] = None) -> None:
         self._jobs: Dict[str, ScanJob] = {}
         self._lock = threading.Lock()
+        self._persist_dir: Optional[Path] = None
+        if persist_dir:
+            self._persist_dir = Path(persist_dir)
+            self._persist_dir.mkdir(parents=True, exist_ok=True)
+            self._load_persisted_jobs()
+
+    def _load_persisted_jobs(self) -> None:
+        """Load previously saved jobs from disk on startup."""
+        if self._persist_dir is None:
+            return
+        for path in self._persist_dir.glob("*.json"):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                job = ScanJob(
+                    id=data["id"],
+                    target=data["target"],
+                    status=data.get("status", "failed"),
+                    created_at=data.get("created_at", 0.0),
+                    events=data.get("events", []),
+                    report=data.get("report"),
+                    error=data.get("error"),
+                )
+                self._jobs[job.id] = job
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to load persisted job %s: %s", path.name, exc)
+
+    def _persist(self, job: ScanJob) -> None:
+        """Write a single job to disk (called under lock)."""
+        if self._persist_dir is None:
+            return
+        path = self._persist_dir / f"{job.id}.json"
+        try:
+            data = {
+                "id": job.id,
+                "target": job.target,
+                "status": job.status,
+                "created_at": job.created_at,
+                "events": job.events,
+                "report": job.report,
+                "error": job.error,
+            }
+            tmp_path = path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2, default=str)
+            tmp_path.replace(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to persist job %s: %s", job.id, exc)
 
     def create(self, target: str) -> ScanJob:
         job = ScanJob(id=uuid.uuid4().hex, target=target)
         with self._lock:
             self._jobs[job.id] = job
+            self._persist(job)
         return job
 
     def get(self, job_id: str) -> Optional[ScanJob]:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def update(self, job: ScanJob) -> None:
+        """Persist the current state of a job."""
+        with self._lock:
+            self._persist(job)
+
     def add_event(self, job_id: str, event: Dict[str, Any]) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
                 job.events.append(event)
+                self._persist(job)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,12 +262,32 @@ class JobStore:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def create_app() -> Starlette:
-    store = JobStore()
+def create_app(
+    *,
+    api_key: Optional[str] = None,
+    persist_dir: Optional[str] = None,
+) -> Starlette:
+    """
+    Build the VortexDAST Starlette ASGI app.
+
+    Parameters
+    ----------
+    api_key : str | None
+        When set, all non-public endpoints require ``Authorization: Bearer <key>``
+        or ``X-API-Key: <key>``.  Defaults to the ``VORTEX_API_KEY`` env var.
+    persist_dir : str | None
+        Directory for JSON job persistence.  Defaults to the ``VORTEX_JOBS_DIR``
+        env var.  When ``None`` / unset, jobs are in-memory only.
+    """
+    resolved_key = api_key if api_key is not None else os.environ.get("VORTEX_API_KEY")
+    resolved_dir = persist_dir if persist_dir is not None else os.environ.get("VORTEX_JOBS_DIR")
+
+    store = JobStore(persist_dir=resolved_dir)
     pool = ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="vdast-api")
 
     def _run_job(job: ScanJob, req: ScanRequest) -> None:
         job.status = "running"
+        store.update(job)
 
         def hook(phase: str, detail: Dict[str, Any]) -> None:
             store.add_event(job.id, {"phase": phase, **detail})
@@ -156,12 +304,14 @@ def create_app() -> Starlette:
             )
             job.report = report.to_dict()
             job.status = "completed"
+            store.update(job)
             if req.callback_url:
                 _send_callback(req.callback_url, report)
         except Exception as exc:  # noqa: BLE001 — surface failure on the job, not the pool
             logger.exception("scan job %s failed", job.id)
             job.status = "failed"
             job.error = str(exc)
+            store.update(job)
             store.add_event(job.id, {"phase": "failed", "error": str(exc)})
 
     async def health(request: Request) -> JSONResponse:
@@ -231,7 +381,11 @@ def create_app() -> Starlette:
         Route("/scan/{job_id}", scan_status, methods=["GET"]),
         Route("/scan/{job_id}/events", scan_events, methods=["GET"]),
     ]
-    app = Starlette(routes=routes)
+
+    app = Starlette(
+        routes=routes,
+        middleware=[Middleware(APIKeyMiddleware, api_key=resolved_key)],
+    )
     app.state.store = store
     return app
 

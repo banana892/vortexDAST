@@ -8,8 +8,8 @@ Detection Strategy
 1.  Load arithmetic polyglot probes from ``payloads/ssti_probes.json``. Each
     probe wraps a distinctive multiplication (``191*7 = 1337``) inside the
     expression syntax of one or more template engines (Jinja2, Twig, FreeMarker,
-    Velocity, Smarty, ERB, Razor, …), surrounded by a unique marker so the
-    reflection can be anchored precisely.
+    Velocity, Smarty, ERB, Razor, Handlebars, Mustache, Pebble, …), surrounded
+    by a unique marker so the reflection can be anchored precisely.
 2.  For each discovered GET parameter and POST form field:
       a. Fetch a **baseline** response with the original value so the computed
          result is not mistaken for pre-existing page content.
@@ -21,6 +21,15 @@ Detection Strategy
            *  only the ``literal`` probe reflected  →  input was echoed but NOT
               evaluated  →  **no finding** (safe; this is the key false-positive
               guard that separates SSTI from plain reflection / XSS).
+3.  **Header injection vectors**: inject probes into Referer, User-Agent, and
+    X-Forwarded-For headers, which are sometimes reflected by error/debug pages
+    or rendered in logging dashboards.
+
+Logic-less Engines
+------------------
+Handlebars / Mustache do not evaluate arithmetic. Instead, probes use
+``{{#with 1337}}{{this}}{{/with}}`` which passes a literal through the engine's
+context, still proving server-side template processing.
 
 False-Positive Reduction
 ------------------------
@@ -72,8 +81,8 @@ class TemplateInjectionModule(BaseScannerModule):
     Heuristic Server-Side Template Injection detection module.
 
     Injects benign arithmetic template expressions into discovered parameters
-    and reports a finding only when the engine returns the *computed* result,
-    proving server-side evaluation.
+    and HTTP headers, and reports a finding only when the engine returns the
+    *computed* result, proving server-side evaluation.
 
     Inherits from :class:`~modules.base.BaseScannerModule`.
     """
@@ -81,22 +90,23 @@ class TemplateInjectionModule(BaseScannerModule):
     name: str = "template_injection"
     description: str = (
         "Injects benign arithmetic template expressions (Jinja2, Twig, "
-        "FreeMarker, Velocity, Smarty, ERB, Razor) into GET and POST "
-        "parameters and reports Server-Side Template Injection when the "
-        "engine evaluates the expression."
+        "FreeMarker, Velocity, Smarty, ERB, Razor, Handlebars, Mustache, "
+        "Pebble) into GET/POST parameters and HTTP headers (Referer, "
+        "User-Agent, X-Forwarded-For) and reports Server-Side Template "
+        "Injection when the engine evaluates the expression."
     )
 
     def __init__(self, requester: Any, payloads_path: Optional[str] = None) -> None:
         super().__init__(requester)
         path = payloads_path or _SSTI_PROBES_PATH
-        self._probes = _load_ssti_probes(path)
+        self._probes, self._header_probes = _load_ssti_probes(path)
 
     # ── Public entry point ────────────────────────────────────────────────────
 
     def run(self, endpoint: CrawledEndpoint) -> List[Finding]:
         findings: List[Finding] = []
 
-        if not self._probes:
+        if not self._probes and not self._header_probes:
             logger.warning(
                 "template_injection: no probes loaded — skipping %s", endpoint.url
             )
@@ -114,6 +124,10 @@ class TemplateInjectionModule(BaseScannerModule):
 
         for form in endpoint.forms:
             findings.extend(self._fuzz_form(form))
+
+        # Header injection vectors.
+        if self._header_probes:
+            findings.extend(self._fuzz_headers(endpoint.url))
 
         return findings
 
@@ -204,6 +218,55 @@ class TemplateInjectionModule(BaseScannerModule):
 
         return findings
 
+    # ── Header injection fuzzing ──────────────────────────────────────────────
+
+    def _fuzz_headers(self, url: str) -> List[Finding]:
+        """
+        Inject SSTI probes into request headers (Referer, User-Agent,
+        X-Forwarded-For) and check if the response reflects the evaluated
+        expression.
+        """
+        findings: List[Finding] = []
+
+        # Get baseline response (no injected headers).
+        try:
+            baseline_resp, baseline_err = self.requester.get(url)
+        except (ValueError, TypeError):
+            return findings
+        if baseline_err or baseline_resp is None:
+            return findings
+        baseline_body = getattr(baseline_resp, "text", "")
+
+        for probe in self._header_probes:
+            header_name = probe["header"]
+            inject_headers = {header_name: probe["value"]}
+
+            try:
+                response, error = self.requester.get(url, headers=inject_headers)
+            except (ValueError, TypeError):
+                continue
+            if error or response is None:
+                logger.debug(
+                    "ssti HEADER failed %s header=%s: %s",
+                    url, header_name, error,
+                )
+                continue
+
+            finding = self._analyse_response(
+                fuzzed_body=response.text,
+                baseline_body=baseline_body,
+                probe=probe,
+                url=url,
+                parameter=f"Header: {header_name}",
+                method="HEADER",
+            )
+            if finding:
+                findings.append(finding)
+                # Don't break — try all headers, as different headers may
+                # reach different template rendering paths.
+
+        return findings
+
     # ── Core response analyser ────────────────────────────────────────────────
 
     def _analyse_response(
@@ -237,6 +300,11 @@ class TemplateInjectionModule(BaseScannerModule):
             url, parameter, probe.get("id"), engines,
         )
 
+        injection_vector = (
+            f"header '{parameter.split(': ', 1)[1]}'" if method == "HEADER"
+            else f"parameter '{parameter}' via {method}"
+        )
+
         return Finding(
             title="Server-Side Template Injection — Expression Evaluated",
             severity=Severity.HIGH,
@@ -247,7 +315,7 @@ class TemplateInjectionModule(BaseScannerModule):
             evidence=snippet,
             description=(
                 f"Injecting the template expression '{probe['value']}' into "
-                f"parameter '{parameter}' via {method} caused the server to return "
+                f"{injection_vector} caused the server to return "
                 f"the evaluated result ('{expected}'). The arithmetic '191*7' was "
                 "computed server-side, which confirms that user input is rendered "
                 f"as a template. Compatible engine(s): {engines}.\n\n"
@@ -310,17 +378,25 @@ def _extract_snippet(body: str, needle: str, pad: int = 80) -> str:
     return body[start:end]
 
 
-def _load_ssti_probes(path: str) -> List[Dict[str, Any]]:
-    """Load and validate SSTI probe definitions from JSON."""
+def _load_ssti_probes(
+    path: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Load and validate SSTI probe definitions from JSON.
+
+    Returns
+    -------
+    tuple[list, list]
+        (parameter_probes, header_probes)
+    """
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
         logger.error("ssti_probes.json not found at %s", path)
-        return []
+        return [], []
     except json.JSONDecodeError as exc:
         logger.error("ssti_probes.json parse error: %s", exc)
-        return []
+        return [], []
 
     probes: List[Dict[str, Any]] = []
     for probe in data.get("probes", []):
@@ -329,5 +405,17 @@ def _load_ssti_probes(path: str) -> List[Dict[str, Any]]:
         else:
             logger.warning("ssti_check: skipping malformed probe %s", probe.get("id"))
 
-    logger.debug("template_injection: loaded %d probes from %s", len(probes), path)
-    return probes
+    header_probes: List[Dict[str, Any]] = []
+    for probe in data.get("header_probes", []):
+        if probe.get("value") and probe.get("expected") and probe.get("header"):
+            header_probes.append(probe)
+        else:
+            logger.warning(
+                "ssti_check: skipping malformed header probe %s", probe.get("id")
+            )
+
+    logger.debug(
+        "template_injection: loaded %d param probes + %d header probes from %s",
+        len(probes), len(header_probes), path,
+    )
+    return probes, header_probes
