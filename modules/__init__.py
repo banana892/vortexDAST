@@ -13,6 +13,7 @@ from .csrf_check import CSRFCheckModule
 from .dir_fuzzer import DirFuzzerModule
 from .param_fuzzer import ParamFuzzerModule
 from .tech_detect import TechDetectModule
+from .template_injection import TemplateInjectionModule
 from .transport_check import TransportCheckModule
 
 __all__ = [
@@ -29,5 +30,6 @@ __all__ = [
     "DirFuzzerModule",
     "ParamFuzzerModule",
     "TechDetectModule",
+    "TemplateInjectionModule",
     "TransportCheckModule",
 ]

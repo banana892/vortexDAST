@@ -1,0 +1,57 @@
+{
+  "meta": {
+    "description": "Benign arithmetic polyglot probes for Server-Side Template Injection (SSTI) detection. Each probe injects a template expression that evaluates a distinctive multiplication. Detection relies on the computed product appearing in the response (proving server-side evaluation), NOT on executing any destructive payload.",
+    "usage": "Wrap each probe value into the target parameter. If the response contains the marked 'expected' string, the template engine evaluated the expression. If only the literal probe is reflected, it was NOT evaluated (not vulnerable).",
+    "safe": true,
+    "marker_prefix": "vtxSSTI",
+    "marker_suffix": "ENDvtx",
+    "references": [
+      "https://portswigger.net/research/server-side-template-injection",
+      "https://owasp.org/www-community/attacks/Server_Side_Template_Injection"
+    ]
+  },
+  "probes": [
+    {
+      "id": "ssti_jinja_twig_curly",
+      "engines": ["Jinja2", "Twig", "Nunjucks"],
+      "value": "vtxSSTI{{191*7}}ENDvtx",
+      "literal": "vtxSSTI{{191*7}}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx"
+    },
+    {
+      "id": "ssti_freemarker_dollar",
+      "engines": ["FreeMarker", "Thymeleaf-inline"],
+      "value": "vtxSSTI${191*7}ENDvtx",
+      "literal": "vtxSSTI${191*7}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx"
+    },
+    {
+      "id": "ssti_velocity_hash",
+      "engines": ["Velocity", "Spring-EL hash"],
+      "value": "vtxSSTI#{191*7}ENDvtx",
+      "literal": "vtxSSTI#{191*7}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx"
+    },
+    {
+      "id": "ssti_smarty_single",
+      "engines": ["Smarty", "Mako-brace"],
+      "value": "vtxSSTI{191*7}ENDvtx",
+      "literal": "vtxSSTI{191*7}ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx"
+    },
+    {
+      "id": "ssti_erb_scriptlet",
+      "engines": ["ERB", "EJS"],
+      "value": "vtxSSTI<%= 191*7 %>ENDvtx",
+      "literal": "vtxSSTI<%= 191*7 %>ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx"
+    },
+    {
+      "id": "ssti_razor_at",
+      "engines": ["Razor"],
+      "value": "vtxSSTI@(191*7)ENDvtx",
+      "literal": "vtxSSTI@(191*7)ENDvtx",
+      "expected": "vtxSSTI1337ENDvtx"
+    }
+  ]
+}
