@@ -56,3 +56,104 @@ Headless browser automation via Playwright ensures coverage of modern Single Pag
     │  - Human-readable Markdown & HTML summaries          │
     │  - Remediation guidance & CVSS scoring breakdown     │
     └──────────────────────────────────────────────────────┘
+
+## 3. CLI Usage
+
+```text
+usage: vortexdast [-h] [--list-modules] [--target URL] [--max-depth N]
+                  [--modules MODULES] [--recon-only] [--rate-limit RPS]
+                  [--threads N] [--concurrency N] [--timeout SECS]
+                  [--max-endpoints N] [--insecure] [--dynamic] [--config PATH]
+                  [--proxy URL] [--cookie STRING] [--header HEADER]
+                  [--auth-user USER] [--auth-pass PASS] [--min-severity LEVEL]
+                  [--min-confidence LEVEL] [--suppress FILE] [--output FILE]
+                  [--verbose]
+
+VortexDAST — Lightweight Dynamic Application Security Testing Framework.
+Crawls a target web application and runs configurable vulnerability modules.
+
+options:
+  -h, --help            show this help message and exit
+  --list-modules        Print a Rich table of all registered scanner modules
+                        with their IDs and descriptions, then exit with code
+                        0.
+  --target, -u URL      Target base URL to scan (required unless --list-
+                        modules). Example: https://target.example.com
+  --max-depth N         Crawler BFS recursion depth (default: value from
+                        config.yaml, usually 3).
+  --modules, -m MODULES
+                        Comma-separated list of modules to run, or "all". Run
+                        --list-modules to see all available IDs. Default: all
+  --recon-only          Run only reconnaissance modules (tech_detect,
+                        dir_fuzzer, param_fuzzer). Overrides --modules.
+  --rate-limit RPS      Override requests-per-second rate limit (0 =
+                        disabled). Default from config.yaml (usually 5). Safe
+                        to raise to 20.0 for authorised remote targets.
+  --threads, -t N       Number of concurrent worker threads used by scanner
+                        modules. Higher values reduce wall-clock time for
+                        probe-heavy modules (XSS, SQLi, SSRF). Default: 10.
+                        Recommended range: 5–20. See also: --concurrency
+                        (alias that takes precedence).
+  --concurrency N       Number of concurrent worker threads (alias for
+                        --threads; takes precedence when both are specified).
+                        Recommended range: 5–20.
+  --timeout SECS        Per-request HTTP timeout in seconds. Overrides the
+                        value in config.yaml (usually 10 s). Useful for slow
+                        targets (raise to 30) or CI speed (lower to 5).
+  --max-endpoints N     Cap the number of crawled endpoints passed to scanner
+                        modules. Useful for quick reconnaissance scans (e.g.
+                        --max-endpoints 10). Default: unlimited.
+  --insecure, -k        Disable SSL certificate verification (for self-signed
+                        certs in local labs).
+  --dynamic             Enable Playwright headless browser crawling for JS-
+                        rendered SPAs. Requires: playwright install chromium
+  --config PATH         Path to config.yaml (default:
+                        /home/naishring/VortexDAST/config.yaml).
+  --proxy URL           HTTP proxy URL (e.g. http://127.0.0.1:8080).
+  --cookie, -C STRING   Inject session cookies into every request. Format:
+                        "NAME=VALUE; NAME2=VALUE2" (same as a browser Cookie
+                        header). Example: --cookie "JSESSIONID=abc123;
+                        auth=true"
+  --header, -H HEADER   Add a custom HTTP header to every request (may be
+                        repeated). Format: "Name: Value". Example: -H
+                        "Authorization: Bearer eyJhbG..." -H "X-API-Key:
+                        secret"
+  --auth-user USER      Username for HTTP Basic / Digest authentication.
+  --auth-pass PASS      Password for HTTP Basic / Digest authentication (pair
+                        with --auth-user).
+  --min-severity LEVEL  Only report findings at or above this severity
+                        (critical, high, medium, low, informational).
+  --min-confidence LEVEL
+                        Only report findings at or above this confidence
+                        (certain, firm, tentative). Use 'firm' to hide
+                        heuristic hits that need manual verification.
+  --suppress FILE       YAML file of suppression rules for known false
+                        positives (see suppress.example.yaml).
+  --output, -o FILE     Output file for the scan report (.json, .md, or
+                        .html). If omitted, terminal output only.
+  --verbose, -v         Enable verbose DEBUG logging.
+
+Examples:
+  vortex --list-modules
+  vortex -u http://testphp.vulnweb.com
+  vortex -u https://app.local -k -m xss_check,sqli_check
+  vortex -u http://target.com --max-depth 2 -o results.json
+  vortex -u http://target.com --modules all --rate-limit 20 --concurrency 20
+  vortex -u http://target.com --max-endpoints 10 --timeout 5 --rate-limit 10
+  vortexdast -u http://target.com --dynamic --verbose
+```
+
+## 4. Confidence Levels & Filtering
+
+Every finding carries a `confidence` alongside its severity:
+
+| Confidence | Meaning | Examples |
+|------------|---------|----------|
+| `certain`  | Directly observed | Missing security header, OS file contents returned, `.env` matched its content signature |
+| `firm`     | Strong signal absent from the baseline | New DBMS error string, unencoded XSS reflection, missing CSRF token |
+| `tentative`| Heuristic — verify manually | HTTP 500 on probe, boolean-blind length delta, SSRF timing, hidden-param length change |
+
+Findings removed by `--min-severity`, `--min-confidence`, or `--suppress` rules don't appear in reports
+and don't count toward exit code `2`. Run with `-v` to see each filtered finding and the reason.
+See `suppress.example.yaml` for the rule format.
+

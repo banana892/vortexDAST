@@ -1,0 +1,312 @@
+{
+  "meta": {
+    "description": "Technology stack fingerprint signatures mapping headers, cookies, script sources, and DOM markers to web servers, frameworks, and frontend libraries.",
+    "safe": true
+  },
+  "headers": [
+    {
+      "tech": "Nginx",
+      "category": "Web Server",
+      "header": "Server",
+      "regex": "(?i)nginx(?:/([0-9.]+))?"
+    },
+    {
+      "tech": "Apache HTTP Server",
+      "category": "Web Server",
+      "header": "Server",
+      "regex": "(?i)apache(?:/([0-9.]+))?"
+    },
+    {
+      "tech": "Microsoft IIS",
+      "category": "Web Server",
+      "header": "Server",
+      "regex": "(?i)microsoft-iis(?:/([0-9.]+))?"
+    },
+    {
+      "tech": "Cloudflare",
+      "category": "CDN / Reverse Proxy",
+      "header": "Server",
+      "regex": "(?i)cloudflare"
+    },
+    {
+      "tech": "Caddy",
+      "category": "Web Server",
+      "header": "Server",
+      "regex": "(?i)caddy"
+    },
+    {
+      "tech": "LiteSpeed",
+      "category": "Web Server",
+      "header": "Server",
+      "regex": "(?i)litespeed"
+    },
+    {
+      "tech": "Gunicorn",
+      "category": "WSGI Server",
+      "header": "Server",
+      "regex": "(?i)gunicorn(?:/([0-9.]+))?"
+    },
+    {
+      "tech": "Werkzeug",
+      "category": "WSGI Server / Python",
+      "header": "Server",
+      "regex": "(?i)werkzeug(?:/([0-9.]+))?"
+    },
+    {
+      "tech": "Kestrel",
+      "category": "Web Server / .NET",
+      "header": "Server",
+      "regex": "(?i)kestrel"
+    },
+    {
+      "tech": "PHP",
+      "category": "Programming Language",
+      "header": "X-Powered-By",
+      "regex": "(?i)php(?:/([0-9.]+))?"
+    },
+    {
+      "tech": "Express.js",
+      "category": "Web Framework (Node.js)",
+      "header": "X-Powered-By",
+      "regex": "(?i)express"
+    },
+    {
+      "tech": "ASP.NET",
+      "category": "Web Framework (.NET)",
+      "header": "X-Powered-By",
+      "regex": "(?i)asp\\.net"
+    },
+    {
+      "tech": "ASP.NET",
+      "category": "Web Framework (.NET)",
+      "header": "X-AspNet-Version",
+      "regex": "([0-9.]+)"
+    },
+    {
+      "tech": "ASP.NET MVC",
+      "category": "Web Framework (.NET)",
+      "header": "X-AspNetMvc-Version",
+      "regex": "([0-9.]+)"
+    },
+    {
+      "tech": "Next.js",
+      "category": "Web Framework (React)",
+      "header": "X-Powered-By",
+      "regex": "(?i)next\\.js"
+    },
+    {
+      "tech": "Ruby on Rails",
+      "category": "Web Framework (Ruby)",
+      "header": "X-Powered-By",
+      "regex": "(?i)phusion_passenger|rails"
+    },
+    {
+      "tech": "Ruby on Rails",
+      "category": "Web Framework (Ruby)",
+      "header": "X-Rack-Cache",
+      "regex": ".*"
+    },
+    {
+      "tech": "Drupal",
+      "category": "CMS (PHP)",
+      "header": "X-Generator",
+      "regex": "(?i)drupal(?:\\s+([0-9]+))?"
+    },
+    {
+      "tech": "WordPress",
+      "category": "CMS (PHP)",
+      "header": "X-Powered-By",
+      "regex": "(?i)w3\\s+total\\s+cache|wp-super-cache"
+    },
+    {
+      "tech": "FastAPI / Starlette",
+      "category": "Web Framework (Python)",
+      "header": "Server",
+      "regex": "(?i)uvicorn"
+    }
+  ],
+  "cookies": [
+    {
+      "tech": "PHP",
+      "category": "Programming Language",
+      "name_regex": "^PHPSESSID$"
+    },
+    {
+      "tech": "Laravel",
+      "category": "Web Framework (PHP)",
+      "name_regex": "(?i)^laravel_session$|^XSRF-TOKEN$"
+    },
+    {
+      "tech": "Django",
+      "category": "Web Framework (Python)",
+      "name_regex": "^csrftoken$|^sessionid$"
+    },
+    {
+      "tech": "Flask",
+      "category": "Web Framework (Python)",
+      "name_regex": "^session$"
+    },
+    {
+      "tech": "Java / Spring Boot",
+      "category": "Web Framework (Java)",
+      "name_regex": "^JSESSIONID$"
+    },
+    {
+      "tech": "ASP.NET",
+      "category": "Web Framework (.NET)",
+      "name_regex": "(?i)^ASP\\.NET_SessionId$|^\\.AspNetCore\\."
+    },
+    {
+      "tech": "Express.js",
+      "category": "Web Framework (Node.js)",
+      "name_regex": "^connect\\.sid$"
+    },
+    {
+      "tech": "Ruby on Rails",
+      "category": "Web Framework (Ruby)",
+      "name_regex": "(?i)_session_id$|_rails_admin_session$"
+    },
+    {
+      "tech": "WordPress",
+      "category": "CMS (PHP)",
+      "name_regex": "(?i)^wordpress_|^wp-settings-"
+    }
+  ],
+  "scripts": [
+    {
+      "tech": "React",
+      "category": "Frontend Framework",
+      "src_regex": "(?i)react(?:\\.production\\.min|\\.development|-[0-9.]+)?\\.js|react-dom"
+    },
+    {
+      "tech": "Vue.js",
+      "category": "Frontend Framework",
+      "src_regex": "(?i)vue(?:\\.runtime|\\.min|\\.esm|-[0-9.]+)?\\.js"
+    },
+    {
+      "tech": "Angular",
+      "category": "Frontend Framework",
+      "src_regex": "(?i)angular(?:\\.min|-[0-9.]+)?\\.js|main\\.[a-f0-9]+\\.js|runtime\\.[a-f0-9]+\\.js"
+    },
+    {
+      "tech": "Next.js",
+      "category": "Web Framework (React)",
+      "src_regex": "(?i)/_next/static/"
+    },
+    {
+      "tech": "Nuxt.js",
+      "category": "Web Framework (Vue.js)",
+      "src_regex": "(?i)/_nuxt/"
+    },
+    {
+      "tech": "jQuery",
+      "category": "JavaScript Library",
+      "src_regex": "(?i)jquery(?:-([0-9.]+))?(?:\\.min)?\\.js"
+    },
+    {
+      "tech": "Bootstrap",
+      "category": "UI Framework",
+      "src_regex": "(?i)bootstrap(?:\\.bundle)?(?:-([0-9.]+))?(?:\\.min)?\\.js"
+    },
+    {
+      "tech": "Alpine.js",
+      "category": "Frontend Framework",
+      "src_regex": "(?i)alpine(?:\\.min)?\\.js"
+    },
+    {
+      "tech": "WordPress",
+      "category": "CMS (PHP)",
+      "src_regex": "(?i)/wp-includes/|/wp-content/"
+    },
+    {
+      "tech": "Svelte",
+      "category": "Frontend Framework",
+      "src_regex": "(?i)/_app/immutable/|svelte"
+    }
+  ],
+  "dom_markers": [
+    {
+      "tech": "WordPress",
+      "category": "CMS (PHP)",
+      "type": "meta",
+      "attribute": "generator",
+      "regex": "(?i)wordpress(?:\\s+([0-9.]+))?"
+    },
+    {
+      "tech": "Drupal",
+      "category": "CMS (PHP)",
+      "type": "meta",
+      "attribute": "generator",
+      "regex": "(?i)drupal(?:\\s+([0-9.]+))?"
+    },
+    {
+      "tech": "Joomla",
+      "category": "CMS (PHP)",
+      "type": "meta",
+      "attribute": "generator",
+      "regex": "(?i)joomla(?:!\\s+([0-9.]+))?"
+    },
+    {
+      "tech": "Gatsby",
+      "category": "Static Site Generator",
+      "type": "meta",
+      "attribute": "generator",
+      "regex": "(?i)gatsby(?:\\s+([0-9.]+))?"
+    },
+    {
+      "tech": "Hugo",
+      "category": "Static Site Generator",
+      "type": "meta",
+      "attribute": "generator",
+      "regex": "(?i)hugo(?:\\s+([0-9.]+))?"
+    },
+    {
+      "tech": "Next.js",
+      "category": "Web Framework (React)",
+      "type": "html",
+      "regex": "(?i)<div id=\"__next\">|__NEXT_DATA__"
+    },
+    {
+      "tech": "Nuxt.js",
+      "category": "Web Framework (Vue.js)",
+      "type": "html",
+      "regex": "(?i)<div id=\"__nuxt\">|__NUXT__"
+    },
+    {
+      "tech": "React",
+      "category": "Frontend Framework",
+      "type": "html",
+      "regex": "data-reactroot|data-reactid"
+    },
+    {
+      "tech": "Angular",
+      "category": "Frontend Framework",
+      "type": "html",
+      "regex": "ng-version=|<app-root|_ngcontent-"
+    },
+    {
+      "tech": "Vue.js",
+      "category": "Frontend Framework",
+      "type": "html",
+      "regex": "data-v-[a-f0-9]{6,8}|v-cloak"
+    },
+    {
+      "tech": "Ruby on Rails",
+      "category": "Web Framework (Ruby)",
+      "type": "html",
+      "regex": "(?i)<meta name=\"csrf-param\" content=\"authenticity_token\""
+    },
+    {
+      "tech": "Django",
+      "category": "Web Framework (Python)",
+      "type": "html",
+      "regex": "(?i)<input[^>]+name=[\"']csrfmiddlewaretoken[\"']"
+    },
+    {
+      "tech": "Spring Boot",
+      "category": "Web Framework (Java)",
+      "type": "html",
+      "regex": "(?i)There was an unexpected error \\(type=.*, status=\\d+\\)|Whitelabel Error Page"
+    }
+  ]
+}

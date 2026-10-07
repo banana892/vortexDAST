@@ -40,6 +40,22 @@ class Severity(str, Enum):
     INFORMATIONAL = "informational"
 
 
+class Confidence(str, Enum):
+    """How strongly the observed evidence supports the finding."""
+
+    CERTAIN = "certain"
+    """Directly observed (e.g. a missing header, leaked file contents)."""
+
+    FIRM = "firm"
+    """Strong signal not present in the baseline (e.g. new DBMS error, raw reflection)."""
+
+    TENTATIVE = "tentative"
+    """Heuristic signal that needs manual verification (e.g. HTTP 500, timing, length delta)."""
+
+
+CONFIDENCE_ORDER: List[str] = [c.value for c in Confidence]
+
+
 @dataclass
 class Finding:
     """
@@ -57,6 +73,9 @@ class Finding:
 
     severity: Severity = Severity.INFORMATIONAL
     """CVSS-aligned severity rating."""
+
+    confidence: Confidence = Confidence.FIRM
+    """How strongly the evidence supports this finding."""
 
     url: str = ""
     """The endpoint URL where the vulnerability was observed."""
@@ -98,6 +117,7 @@ class Finding:
             "id": self.id,
             "title": self.title,
             "severity": self.severity.value,
+            "confidence": self.confidence.value,
             "cvss_vector": self.cvss_vector,
             "cvss_score": self.cvss_score,
             "url": self.url,

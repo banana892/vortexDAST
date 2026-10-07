@@ -1,0 +1,415 @@
+{
+  "meta": {
+    "description": "Curated list of common administrative, backup, diagnostic, and configuration path suffixes for non-destructive reconnaissance and sensitive file discovery.",
+    "safe": true,
+    "total": 65
+  },
+  "paths": [
+    {
+      "path": "/.env",
+      "category": "config",
+      "severity": "high",
+      "description": "Environment configuration file containing sensitive secrets, API keys, or database credentials",
+      "content_regex": "(?m)^[A-Z0-9_]+=[^\\r\\n]+"
+    },
+    {
+      "path": "/.env.local",
+      "category": "config",
+      "severity": "high",
+      "description": "Local environment override file with developer credentials",
+      "content_regex": "(?m)^[A-Z0-9_]+=[^\\r\\n]+"
+    },
+    {
+      "path": "/.env.production",
+      "category": "config",
+      "severity": "high",
+      "description": "Production environment file with live deployment credentials",
+      "content_regex": "(?m)^[A-Z0-9_]+=[^\\r\\n]+"
+    },
+    {
+      "path": "/.env.bak",
+      "category": "config",
+      "severity": "high",
+      "description": "Backup of environment configuration file",
+      "content_regex": "(?m)^[A-Z0-9_]+=[^\\r\\n]+"
+    },
+    {
+      "path": "/config.json",
+      "category": "config",
+      "severity": "medium",
+      "description": "Application configuration file in JSON format"
+    },
+    {
+      "path": "/config.yaml",
+      "category": "config",
+      "severity": "medium",
+      "description": "Application configuration file in YAML format"
+    },
+    {
+      "path": "/config.yml",
+      "category": "config",
+      "severity": "medium",
+      "description": "Application configuration file in YAML format"
+    },
+    {
+      "path": "/settings.py",
+      "category": "config",
+      "severity": "high",
+      "description": "Django/Python project settings file with SECRET_KEY or database definitions"
+    },
+    {
+      "path": "/web.config",
+      "category": "config",
+      "severity": "high",
+      "description": "IIS / ASP.NET configuration file containing connection strings and handler rules"
+    },
+    {
+      "path": "/docker-compose.yml",
+      "category": "config",
+      "severity": "medium",
+      "description": "Docker compose infrastructure configuration exposing service topology"
+    },
+    {
+      "path": "/Dockerfile",
+      "category": "config",
+      "severity": "low",
+      "description": "Docker container build specification"
+    },
+    {
+      "path": "/.git/HEAD",
+      "category": "vcs",
+      "severity": "high",
+      "description": "Exposed Git repository HEAD reference allowing full source code recovery",
+      "content_regex": "ref:\\s+refs/heads/"
+    },
+    {
+      "path": "/.git/config",
+      "category": "vcs",
+      "severity": "high",
+      "description": "Git repository configuration file revealing remote repository URLs and credentials"
+    },
+    {
+      "path": "/.gitignore",
+      "category": "vcs",
+      "severity": "informational",
+      "description": "Git ignore rules revealing internal project file and directory structure"
+    },
+    {
+      "path": "/.svn/entries",
+      "category": "vcs",
+      "severity": "high",
+      "description": "Exposed Subversion repository metadata directory"
+    },
+    {
+      "path": "/.hg/",
+      "category": "vcs",
+      "severity": "high",
+      "description": "Exposed Mercurial repository metadata directory"
+    },
+    {
+      "path": "/admin/",
+      "category": "admin",
+      "severity": "medium",
+      "description": "Administrative control panel or login portal"
+    },
+    {
+      "path": "/admin/login",
+      "category": "admin",
+      "severity": "medium",
+      "description": "Administrative authentication portal"
+    },
+    {
+      "path": "/administrator/",
+      "category": "admin",
+      "severity": "medium",
+      "description": "Administrative dashboard interface"
+    },
+    {
+      "path": "/wp-admin/",
+      "category": "admin",
+      "severity": "medium",
+      "description": "WordPress administrative dashboard portal"
+    },
+    {
+      "path": "/manage/",
+      "category": "admin",
+      "severity": "low",
+      "description": "Application management interface"
+    },
+    {
+      "path": "/dashboard/",
+      "category": "admin",
+      "severity": "low",
+      "description": "Application administration dashboard"
+    },
+    {
+      "path": "/controlpanel/",
+      "category": "admin",
+      "severity": "medium",
+      "description": "Administrative control panel interface"
+    },
+    {
+      "path": "/cpanel/",
+      "category": "admin",
+      "severity": "medium",
+      "description": "Web hosting control panel login interface"
+    },
+    {
+      "path": "/phpmyadmin/",
+      "category": "admin",
+      "severity": "high",
+      "description": "Exposed phpMyAdmin MySQL database management portal"
+    },
+    {
+      "path": "/pgadmin/",
+      "category": "admin",
+      "severity": "high",
+      "description": "Exposed pgAdmin PostgreSQL database management portal"
+    },
+    {
+      "path": "/api/",
+      "category": "api",
+      "severity": "informational",
+      "description": "REST API root directory"
+    },
+    {
+      "path": "/api/v1",
+      "category": "api",
+      "severity": "informational",
+      "description": "Version 1 API root endpoint"
+    },
+    {
+      "path": "/api/v2",
+      "category": "api",
+      "severity": "informational",
+      "description": "Version 2 API root endpoint"
+    },
+    {
+      "path": "/swagger.json",
+      "category": "api",
+      "severity": "medium",
+      "description": "Swagger/OpenAPI v2 API definition schema disclosing all API endpoints and models",
+      "content_regex": "\"swagger\"\\s*:\\s*\"2\\.0\""
+    },
+    {
+      "path": "/swagger.yaml",
+      "category": "api",
+      "severity": "medium",
+      "description": "Swagger/OpenAPI v2 API definition in YAML format"
+    },
+    {
+      "path": "/openapi.json",
+      "category": "api",
+      "severity": "medium",
+      "description": "OpenAPI v3 API definition schema disclosing API endpoints, parameters, and models",
+      "content_regex": "\"openapi\"\\s*:\\s*\"3\\."
+    },
+    {
+      "path": "/openapi.yaml",
+      "category": "api",
+      "severity": "medium",
+      "description": "OpenAPI v3 API definition in YAML format"
+    },
+    {
+      "path": "/swagger-ui.html",
+      "category": "api",
+      "severity": "medium",
+      "description": "Interactive Swagger UI documentation console"
+    },
+    {
+      "path": "/swagger-ui/",
+      "category": "api",
+      "severity": "medium",
+      "description": "Interactive Swagger UI documentation directory"
+    },
+    {
+      "path": "/docs/",
+      "category": "api",
+      "severity": "informational",
+      "description": "Interactive API documentation interface (FastAPI / Swagger / Redoc)"
+    },
+    {
+      "path": "/graphql",
+      "category": "api",
+      "severity": "low",
+      "description": "GraphQL API endpoint supporting schema queries and mutations"
+    },
+    {
+      "path": "/graphiql",
+      "category": "api",
+      "severity": "low",
+      "description": "Interactive GraphiQL development console"
+    },
+    {
+      "path": "/api-docs",
+      "category": "api",
+      "severity": "informational",
+      "description": "API documentation index endpoint"
+    },
+    {
+      "path": "/backup.zip",
+      "category": "backup",
+      "severity": "high",
+      "description": "Compressed application or database backup archive"
+    },
+    {
+      "path": "/backup.tar.gz",
+      "category": "backup",
+      "severity": "high",
+      "description": "Compressed tarball archive containing application backup files"
+    },
+    {
+      "path": "/backup.sql",
+      "category": "backup",
+      "severity": "high",
+      "description": "SQL database dump file containing table schemas and data"
+    },
+    {
+      "path": "/dump.sql",
+      "category": "backup",
+      "severity": "high",
+      "description": "Raw SQL database dump file"
+    },
+    {
+      "path": "/db.sqlite3",
+      "category": "backup",
+      "severity": "high",
+      "description": "Raw SQLite database file containing application state and data"
+    },
+    {
+      "path": "/backup.bak",
+      "category": "backup",
+      "severity": "high",
+      "description": "Backup file archive"
+    },
+    {
+      "path": "/site.zip",
+      "category": "backup",
+      "severity": "high",
+      "description": "Website source code archive"
+    },
+    {
+      "path": "/app.zip",
+      "category": "backup",
+      "severity": "high",
+      "description": "Application bundle zip archive"
+    },
+    {
+      "path": "/robots.txt",
+      "category": "info",
+      "severity": "informational",
+      "description": "Robots exclusion standard file disclosing crawler restrictions and hidden paths",
+      "content_regex": "(?i)user-agent\\s*:"
+    },
+    {
+      "path": "/sitemap.xml",
+      "category": "info",
+      "severity": "informational",
+      "description": "XML sitemap indexing application URLs and navigation structure",
+      "content_regex": "<urlset|<sitemapindex"
+    },
+    {
+      "path": "/security.txt",
+      "category": "info",
+      "severity": "informational",
+      "description": "Vulnerability disclosure security contact file"
+    },
+    {
+      "path": "/.well-known/security.txt",
+      "category": "info",
+      "severity": "informational",
+      "description": "Standard well-known vulnerability disclosure contact file",
+      "content_regex": "(?i)contact\\s*:"
+    },
+    {
+      "path": "/crossdomain.xml",
+      "category": "info",
+      "severity": "low",
+      "description": "Flash/Silverlight cross-domain policy file"
+    },
+    {
+      "path": "/clientaccesspolicy.xml",
+      "category": "info",
+      "severity": "low",
+      "description": "Silverlight client access policy file"
+    },
+    {
+      "path": "/humans.txt",
+      "category": "info",
+      "severity": "informational",
+      "description": "Author and team attribution information file"
+    },
+    {
+      "path": "/server-status",
+      "category": "status",
+      "severity": "medium",
+      "description": "Apache HTTP server status page exposing client connections and request URLs"
+    },
+    {
+      "path": "/server-info",
+      "category": "status",
+      "severity": "medium",
+      "description": "Apache HTTP server configuration info page"
+    },
+    {
+      "path": "/info.php",
+      "category": "status",
+      "severity": "medium",
+      "description": "PHP info diagnostic page exposing environment variables, module versions, and paths"
+    },
+    {
+      "path": "/phpinfo.php",
+      "category": "status",
+      "severity": "medium",
+      "description": "PHP configuration page exposing runtime details and server configuration"
+    },
+    {
+      "path": "/health",
+      "category": "status",
+      "severity": "informational",
+      "description": "Application health check probe endpoint"
+    },
+    {
+      "path": "/metrics",
+      "category": "status",
+      "severity": "low",
+      "description": "Prometheus or application performance telemetry metrics endpoint"
+    },
+    {
+      "path": "/actuator/",
+      "category": "status",
+      "severity": "medium",
+      "description": "Spring Boot Actuator discovery endpoint"
+    },
+    {
+      "path": "/actuator/health",
+      "category": "status",
+      "severity": "informational",
+      "description": "Spring Boot Actuator health status endpoint"
+    },
+    {
+      "path": "/actuator/env",
+      "category": "status",
+      "severity": "high",
+      "description": "Spring Boot Actuator environment endpoint exposing config properties and secrets"
+    },
+    {
+      "path": "/access.log",
+      "category": "log",
+      "severity": "medium",
+      "description": "Web server access log file leaking client IP addresses and visited URLs"
+    },
+    {
+      "path": "/error.log",
+      "category": "log",
+      "severity": "medium",
+      "description": "Web server error log file leaking stack traces and internal errors"
+    },
+    {
+      "path": "/debug.log",
+      "category": "log",
+      "severity": "medium",
+      "description": "Application debug log file exposing internal debug events"
+    }
+  ]
+}

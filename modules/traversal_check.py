@@ -56,7 +56,7 @@ import re
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-from .base import BaseScannerModule, Finding, Severity
+from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
 from core.cvss import build_vector, calculate as cvss_calc
 from core.requester import Requester
@@ -319,6 +319,7 @@ class TraversalCheckModule(BaseScannerModule):
                     Finding(
                         title="Path Traversal / Local File Inclusion (LFI)",
                         severity=Severity.HIGH,
+                        confidence=Confidence.CERTAIN,
                         url=endpoint.url,
                         parameter=param_name,
                         payload=probe_value,

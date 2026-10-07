@@ -42,7 +42,7 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-from .base import BaseScannerModule, Finding, Severity
+from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
 from core.cvss import build_vector, calculate as cvss_calc
 
@@ -270,6 +270,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Missing Strict-Transport-Security (HSTS) Header",
                     severity=Severity.MEDIUM,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         "The HTTPS endpoint does not set the Strict-Transport-Security "
@@ -295,6 +296,7 @@ class HeadersAuditModule(BaseScannerModule):
                     Finding(
                         title="Strict-Transport-Security max-age Too Short",
                         severity=Severity.LOW,
+                        confidence=Confidence.CERTAIN,
                         url=url,
                         description=(
                             f"HSTS max-age is set to {max_age} seconds "
@@ -313,6 +315,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Strict-Transport-Security Missing max-age Directive",
                     severity=Severity.LOW,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description="HSTS header present but lacks a valid max-age directive.",
                     remediation="Ensure the header includes a valid max-age value.",
@@ -328,6 +331,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Strict-Transport-Security Missing includeSubDomains",
                     severity=Severity.INFORMATIONAL,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         "HSTS header does not include the ``includeSubDomains`` directive. "
@@ -356,6 +360,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Missing Content-Security-Policy (CSP) Header",
                     severity=Severity.MEDIUM,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         "No Content-Security-Policy header was detected. Without a CSP, "
@@ -381,6 +386,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Content-Security-Policy Allows 'unsafe-inline'",
                     severity=Severity.MEDIUM,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         "The CSP policy contains 'unsafe-inline', which permits the "
@@ -403,6 +409,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Content-Security-Policy Allows 'unsafe-eval'",
                     severity=Severity.MEDIUM,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         "The CSP policy contains 'unsafe-eval', which permits the use "
@@ -425,6 +432,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Content-Security-Policy Contains Wildcard Source (*)",
                     severity=Severity.LOW,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         "The CSP policy contains a wildcard (*) in a source directive, "
@@ -452,6 +460,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Missing X-Frame-Options Header",
                     severity=Severity.MEDIUM,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         "The X-Frame-Options header is not set. Without this header, "
@@ -477,6 +486,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="X-Frame-Options Has Weak or Invalid Value",
                     severity=Severity.LOW,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         f"X-Frame-Options is set to '{xfo_value}'. "
@@ -504,6 +514,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Missing X-Content-Type-Options Header",
                     severity=Severity.LOW,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         "The X-Content-Type-Options header is absent. Without 'nosniff', "
@@ -523,6 +534,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="X-Content-Type-Options Has Invalid Value",
                     severity=Severity.LOW,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         f"X-Content-Type-Options is set to '{xcto_value}' — the only "
@@ -550,6 +562,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Missing Referrer-Policy Header",
                     severity=Severity.INFORMATIONAL,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         "No Referrer-Policy header is set. Browsers may send the full "
@@ -572,6 +585,7 @@ class HeadersAuditModule(BaseScannerModule):
                 Finding(
                     title="Permissive Referrer-Policy Detected",
                     severity=Severity.INFORMATIONAL,
+                    confidence=Confidence.CERTAIN,
                     url=url,
                     description=(
                         f"Referrer-Policy is set to '{rp_value}', which sends the full "
@@ -611,6 +625,7 @@ class HeadersAuditModule(BaseScannerModule):
                     Finding(
                         title="Cookie Missing HttpOnly Flag",
                         severity=Severity.MEDIUM,
+                        confidence=Confidence.CERTAIN,
                         url=url,
                         description=(
                             f"The cookie '{cookie_name}' is set without the HttpOnly flag. "
@@ -630,6 +645,7 @@ class HeadersAuditModule(BaseScannerModule):
                     Finding(
                         title="Cookie Missing Secure Flag",
                         severity=Severity.MEDIUM,
+                        confidence=Confidence.CERTAIN,
                         url=url,
                         description=(
                             f"The cookie '{cookie_name}' is set without the Secure flag. "
@@ -648,6 +664,7 @@ class HeadersAuditModule(BaseScannerModule):
                     Finding(
                         title="Cookie Missing SameSite Attribute",
                         severity=Severity.LOW,
+                        confidence=Confidence.CERTAIN,
                         url=url,
                         description=(
                             f"The cookie '{cookie_name}' has no SameSite attribute. "
@@ -671,6 +688,7 @@ class HeadersAuditModule(BaseScannerModule):
                             Finding(
                                 title="Cookie SameSite=None Without Secure Flag",
                                 severity=Severity.MEDIUM,
+                                confidence=Confidence.CERTAIN,
                                 url=url,
                                 description=(
                                     f"Cookie '{cookie_name}' uses SameSite=None without "

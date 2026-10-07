@@ -57,7 +57,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode, urlparse
 
-from .base import BaseScannerModule, Finding, Severity
+from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
 from core.cvss import build_vector, calculate as cvss_calc
 from core.parser import ParsedForm
@@ -489,6 +489,7 @@ class SSRFCheckModule(BaseScannerModule):
         return Finding(
             title=f"Potential SSRF — {probe['description']}",
             severity=severity,
+            confidence=Confidence.FIRM if severity == Severity.HIGH else Confidence.TENTATIVE,
             url=url,
             parameter=parameter,
             payload=probe["value"],

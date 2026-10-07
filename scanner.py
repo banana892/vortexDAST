@@ -69,9 +69,10 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from core.crawler import CrawlResult, CrawledEndpoint, Crawler
+from core.filters import SEVERITY_ORDER, FilterConfigError, FindingFilter, load_suppression_rules
 from core.reporter import Reporter
 from core.requester import Requester
-from modules.base import BaseScannerModule, Finding
+from modules.base import CONFIDENCE_ORDER, BaseScannerModule, Finding
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Module registry – dynamic discovery
@@ -361,6 +362,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--recon-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Run only reconnaissance modules (tech_detect, dir_fuzzer, param_fuzzer). "
+            "Overrides --modules."
+        ),
+    )
+    parser.add_argument(
         "--rate-limit",
         type=float,
         default=None,
@@ -477,6 +487,31 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PASS",
         help="Password for HTTP Basic / Digest authentication (pair with --auth-user).",
+    )
+
+    # ── Finding filters ─────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--min-severity",
+        choices=SEVERITY_ORDER,
+        default=None,
+        metavar="LEVEL",
+        help=f"Only report findings at or above this severity ({', '.join(SEVERITY_ORDER)}).",
+    )
+    parser.add_argument(
+        "--min-confidence",
+        choices=CONFIDENCE_ORDER,
+        default=None,
+        metavar="LEVEL",
+        help=(
+            f"Only report findings at or above this confidence ({', '.join(CONFIDENCE_ORDER)}). "
+            "Use 'firm' to hide heuristic hits that need manual verification."
+        ),
+    )
+    parser.add_argument(
+        "--suppress",
+        default=None,
+        metavar="FILE",
+        help="YAML file of suppression rules for known false positives (see suppress.example.yaml).",
     )
 
     # ── Output ──────────────────────────────────────────────────────────────────
@@ -599,6 +634,17 @@ def run_scan(args: argparse.Namespace) -> int:
     console = Console()
     _configure_logging(args.verbose)
 
+    # Validate filters before scanning so a typo doesn't waste a full scan.
+    try:
+        finding_filter = FindingFilter(
+            min_severity=getattr(args, "min_severity", None),
+            min_confidence=getattr(args, "min_confidence", None),
+            rules=load_suppression_rules(args.suppress) if getattr(args, "suppress", None) else None,
+        )
+    except FilterConfigError as exc:
+        logger.error("Invalid finding filter: %s", exc)
+        return 1
+
     # ── Load configuration ─────────────────────────────────────────────────
     config = _load_config(args.config)
     req_cfg = config.get("requester", {})
@@ -628,7 +674,10 @@ def run_scan(args: argparse.Namespace) -> int:
 
     max_endpoints: Optional[int] = args.max_endpoints  # --max-endpoints
 
-    selected_modules = _resolve_modules(args.modules)
+    if getattr(args, "recon_only", False):
+        selected_modules = _resolve_modules("tech_detect,dir_fuzzer,param_fuzzer")
+    else:
+        selected_modules = _resolve_modules(args.modules)
 
     logger.info("Target : [bold cyan]%s[/bold cyan]", args.target)
     logger.info("Modules: %s", ", ".join(selected_modules))
@@ -865,11 +914,19 @@ def run_scan(args: argparse.Namespace) -> int:
         "ssl_verify": verify_ssl,
     }
 
+    kept_findings, dropped = finding_filter.apply(Reporter.deduplicate_findings(all_findings))
+    if dropped:
+        scan_meta["findings_filtered_out"] = len(dropped)
+        logger.info("Filtered out %d finding(s) via severity/confidence/suppression rules.", len(dropped))
+        for finding, reason in dropped:
+            logger.debug("  filtered: %s @ %s (%s)", finding.title, finding.url, reason)
+
     reporter = Reporter(
-        findings=all_findings,
+        findings=kept_findings,
         target=args.target,
         scan_meta=scan_meta,
         console=console,
+        deduplicate=False,
     )
 
     reporter.print_terminal_summary()
@@ -878,11 +935,7 @@ def run_scan(args: argparse.Namespace) -> int:
         reporter.save(args.output)
 
     # Exit code semantics for CI/CD pipelines.
-    if any(
-        f.severity.value in ("critical", "high")
-        for f in all_findings
-        if isinstance(f.severity, type(f.severity))
-    ):
+    if any(f.severity.value in ("critical", "high") for f in kept_findings):
         return 2  # Findings of HIGH or CRITICAL severity detected.
     return 0
 

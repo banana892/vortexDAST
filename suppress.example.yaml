@@ -1,0 +1,20 @@
+# VortexDAST suppression rules — pass with: vortex -u URL --suppress suppress.yaml
+#
+# Each rule drops findings matching ALL of the fields it specifies.
+#   Exact match : module, severity, confidence
+#   Regex search: title, url, parameter
+#   Optional    : reason (shown in --verbose output)
+# Suppressed findings don't count toward the CI exit code.
+
+suppress:
+  - module: headers_audit
+    title: "Referrer-Policy"
+    reason: "Accepted risk — tracked in SEC-123"
+
+  - module: sqli_check
+    parameter: "^csrf_token$"
+    confidence: tentative
+    reason: "Token rotation causes length differentials"
+
+  - url: "^https://app\\.example\\.com/static/"
+    reason: "Static CDN, out of scope"

@@ -52,7 +52,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
-from .base import BaseScannerModule, Finding, Severity
+from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
 from core.cvss import build_vector, calculate as cvss_calc
 from core.parser import ParsedForm, FormField
@@ -451,6 +451,7 @@ class XSSCheckModule(BaseScannerModule):
         return Finding(
             title="Reflected XSS — Unencoded Boundary Character Reflection",
             severity=Severity.HIGH,
+            confidence=Confidence.FIRM,
             url=url,
             parameter=parameter,
             payload=probe_value,

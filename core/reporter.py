@@ -36,7 +36,7 @@ from rich.table import Table
 from rich import box
 from rich.text import Text
 
-from modules.base import Finding, Severity
+from modules.base import CONFIDENCE_ORDER, Finding, Severity
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -212,6 +212,11 @@ class Reporter:
                     if _SEVERITY_ORDER.index(f_sev) < _SEVERITY_ORDER.index(b_sev):
                         best_sev = f.severity
 
+            best_conf = min(
+                (f.confidence for f in group),
+                key=lambda c: CONFIDENCE_ORDER.index(c.value),
+            )
+
             # Pick highest CVSS score & vector
             best_cvss_score = first.cvss_score
             best_cvss_vector = first.cvss_vector
@@ -232,6 +237,7 @@ class Reporter:
                 id=first.id,
                 title=first.title,
                 severity=best_sev,
+                confidence=best_conf,
                 url=first.url,
                 parameter=first.parameter,
                 payload=first.payload if first.payload else (payloads[0] if payloads else None),
@@ -321,6 +327,7 @@ class Reporter:
             detail_table.add_column("URL", min_width=30, overflow="fold")
             detail_table.add_column("Param", min_width=12)
             detail_table.add_column("CVSS", justify="center", min_width=6)
+            detail_table.add_column("Confidence", min_width=9)
             detail_table.add_column("Module", min_width=14)
 
             for idx, finding in enumerate(bucket, start=1):
@@ -338,6 +345,7 @@ class Reporter:
                     Text(finding.url, style="link " + finding.url),
                     Text(param_display, style="italic"),
                     Text(cvss_display, style=style),
+                    Text(finding.confidence.value, style="dim" if finding.confidence.value == "tentative" else ""),
                     Text(module_name, style="dim"),
                 )
             c.print(detail_table)
@@ -534,6 +542,7 @@ class Reporter:
             f"|-------|-------|",
             f"| **ID** | `{finding.id}` |",
             f"| **Severity** | **{finding.severity.value.upper()}** |",
+            f"| **Confidence** | {finding.confidence.value.capitalize()} |",
         ]
 
         # Real CVSS v3.1 data — show score and full vector if available.
@@ -633,6 +642,7 @@ class Reporter:
               <span class="finding-url-short">{f_url}</span>
             </div>
             <div class="header-right">
+              <span class="cvss-pill">{finding.confidence.value.capitalize()}</span>
               <span class="cvss-pill">CVSS {f_cvss_score}</span>
               <span class="chevron">▼</span>
             </div>
@@ -640,6 +650,7 @@ class Reporter:
           <div class="card-body">
             <table class="details-table">
               <tr><td class="label">Finding ID</td><td><code>{f_id}</code></td></tr>
+              <tr><td class="label">Confidence</td><td>{finding.confidence.value.capitalize()}</td></tr>
               <tr><td class="label">Module</td><td><code>{f_module}</code></td></tr>
               <tr><td class="label">Target URL</td><td><code>{f_url}</code></td></tr>
               {f'<tr><td class="label">Parameter</td><td><code>{f_param}</code></td></tr>' if f_param else ''}

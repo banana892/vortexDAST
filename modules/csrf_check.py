@@ -46,7 +46,7 @@ import re
 from typing import List, Set
 from urllib.parse import urlparse
 
-from .base import BaseScannerModule, Finding, Severity
+from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
 from core.cvss import build_vector, calculate as cvss_calc
 from core.requester import Requester
@@ -233,6 +233,7 @@ class CSRFCheckModule(BaseScannerModule):
                 Finding(
                     title="Missing CSRF Token on State-Changing Form",
                     severity=Severity.HIGH,
+                    confidence=Confidence.FIRM,
                     url=endpoint.url,
                     parameter=f"form[action={action_url}][method={method.upper()}]",
                     payload="(passive audit — no payload injected)",

@@ -1,0 +1,363 @@
+{
+  "meta": {
+    "description": "Curated list of common hidden GET/POST parameter names for non-destructive parameter discovery and fuzzing.",
+    "safe": true,
+    "total": 52
+  },
+  "default_test_values": [
+    "1",
+    "true",
+    "test",
+    "debug"
+  ],
+  "params": [
+    {
+      "name": "debug",
+      "category": "debug",
+      "description": "Enables verbose debug mode or stack traces",
+      "test_values": ["1", "true", "yes", "debug"]
+    },
+    {
+      "name": "test",
+      "category": "debug",
+      "description": "Test environment or dry-run toggle",
+      "test_values": ["1", "true", "test"]
+    },
+    {
+      "name": "admin",
+      "category": "admin",
+      "description": "Administrative privilege escalation flag",
+      "test_values": ["1", "true", "yes", "admin"]
+    },
+    {
+      "name": "adm",
+      "category": "admin",
+      "description": "Abbreviated admin role flag",
+      "test_values": ["1", "true"]
+    },
+    {
+      "name": "root",
+      "category": "admin",
+      "description": "Superuser / root access switch",
+      "test_values": ["1", "true"]
+    },
+    {
+      "name": "dbg",
+      "category": "debug",
+      "description": "Short debug flag",
+      "test_values": ["1", "true"]
+    },
+    {
+      "name": "devel",
+      "category": "debug",
+      "description": "Development environment flag",
+      "test_values": ["1", "true"]
+    },
+    {
+      "name": "development",
+      "category": "debug",
+      "description": "Full development mode trigger",
+      "test_values": ["1", "true"]
+    },
+    {
+      "name": "dev",
+      "category": "debug",
+      "description": "Developer feature flag",
+      "test_values": ["1", "true"]
+    },
+    {
+      "name": "preview",
+      "category": "debug",
+      "description": "Draft or unreleased content preview toggle",
+      "test_values": ["1", "true"]
+    },
+    {
+      "name": "enable",
+      "category": "debug",
+      "description": "Feature toggle parameter",
+      "test_values": ["1", "true", "all"]
+    },
+    {
+      "name": "toggle",
+      "category": "debug",
+      "description": "System feature switch parameter",
+      "test_values": ["1", "true"]
+    },
+    {
+      "name": "redirect",
+      "category": "routing",
+      "description": "Destination URL for HTTP redirection",
+      "test_values": ["https://example.com", "/test"]
+    },
+    {
+      "name": "redirect_uri",
+      "category": "routing",
+      "description": "OAuth / OpenID Connect callback redirection URI",
+      "test_values": ["https://example.com/callback"]
+    },
+    {
+      "name": "redirect_url",
+      "category": "routing",
+      "description": "Authentication or navigation redirection URL",
+      "test_values": ["https://example.com"]
+    },
+    {
+      "name": "url",
+      "category": "routing",
+      "description": "Target URL for proxying, fetching, or redirection",
+      "test_values": ["https://example.com", "http://127.0.0.1"]
+    },
+    {
+      "name": "uri",
+      "category": "routing",
+      "description": "Target URI parameter",
+      "test_values": ["/test", "https://example.com"]
+    },
+    {
+      "name": "dest",
+      "category": "routing",
+      "description": "Destination landing page parameter",
+      "test_values": ["/test"]
+    },
+    {
+      "name": "destination",
+      "category": "routing",
+      "description": "Full destination parameter",
+      "test_values": ["/test"]
+    },
+    {
+      "name": "next",
+      "category": "routing",
+      "description": "Post-action redirect path parameter (common in Django, Flask)",
+      "test_values": ["/dashboard", "/test"]
+    },
+    {
+      "name": "return",
+      "category": "routing",
+      "description": "Return URL parameter",
+      "test_values": ["/test"]
+    },
+    {
+      "name": "return_to",
+      "category": "routing",
+      "description": "Return-to destination after login",
+      "test_values": ["/test"]
+    },
+    {
+      "name": "target",
+      "category": "routing",
+      "description": "Target URL or component identifier",
+      "test_values": ["test", "/test"]
+    },
+    {
+      "name": "forward",
+      "category": "routing",
+      "description": "Internal dispatcher forwarding parameter",
+      "test_values": ["/test"]
+    },
+    {
+      "name": "goto",
+      "category": "routing",
+      "description": "Navigation jump parameter",
+      "test_values": ["/test"]
+    },
+    {
+      "name": "r",
+      "category": "routing",
+      "description": "Shortened redirect parameter",
+      "test_values": ["/test"]
+    },
+    {
+      "name": "file",
+      "category": "file",
+      "description": "Local file or resource name to load/include",
+      "test_values": ["test.txt", "default"]
+    },
+    {
+      "name": "path",
+      "category": "file",
+      "description": "Filesystem or virtual path parameter",
+      "test_values": ["test", "/"]
+    },
+    {
+      "name": "filepath",
+      "category": "file",
+      "description": "Full path to a document or asset",
+      "test_values": ["test.txt"]
+    },
+    {
+      "name": "doc",
+      "category": "file",
+      "description": "Document identifier or filename",
+      "test_values": ["sample", "test"]
+    },
+    {
+      "name": "document",
+      "category": "file",
+      "description": "Full document resource name",
+      "test_values": ["sample.pdf"]
+    },
+    {
+      "name": "folder",
+      "category": "file",
+      "description": "Directory or collection name",
+      "test_values": ["test"]
+    },
+    {
+      "name": "include",
+      "category": "file",
+      "description": "File or template inclusion parameter",
+      "test_values": ["header", "test"]
+    },
+    {
+      "name": "page",
+      "category": "file",
+      "description": "Page view or pagination template selector",
+      "test_values": ["1", "home", "test"]
+    },
+    {
+      "name": "template",
+      "category": "file",
+      "description": "Server-side template layout selector",
+      "test_values": ["default", "test"]
+    },
+    {
+      "name": "layout",
+      "category": "file",
+      "description": "UI layout wrapper template name",
+      "test_values": ["main", "test"]
+    },
+    {
+      "name": "view",
+      "category": "file",
+      "description": "Sub-view or component renderer name",
+      "test_values": ["summary", "test"]
+    },
+    {
+      "name": "id",
+      "category": "lookup",
+      "description": "Primary resource record identifier",
+      "test_values": ["1", "0", "100"]
+    },
+    {
+      "name": "user_id",
+      "category": "lookup",
+      "description": "User account identifier for profile lookups",
+      "test_values": ["1", "0", "admin"]
+    },
+    {
+      "name": "uid",
+      "category": "lookup",
+      "description": "Short user ID parameter",
+      "test_values": ["1", "0"]
+    },
+    {
+      "name": "account",
+      "category": "lookup",
+      "description": "Account number or identifier",
+      "test_values": ["1", "test"]
+    },
+    {
+      "name": "key",
+      "category": "lookup",
+      "description": "API or cache access key",
+      "test_values": ["test", "demo"]
+    },
+    {
+      "name": "query",
+      "category": "lookup",
+      "description": "Search or filter query string",
+      "test_values": ["test", "vortex"]
+    },
+    {
+      "name": "q",
+      "category": "lookup",
+      "description": "Single-letter query parameter",
+      "test_values": ["test", "vortex"]
+    },
+    {
+      "name": "search",
+      "category": "lookup",
+      "description": "Full search keyword parameter",
+      "test_values": ["test"]
+    },
+    {
+      "name": "token",
+      "category": "lookup",
+      "description": "Authentication or CSRF token parameter",
+      "test_values": ["test", "null"]
+    },
+    {
+      "name": "secret",
+      "category": "lookup",
+      "description": "Pre-shared secret or key",
+      "test_values": ["test"]
+    },
+    {
+      "name": "code",
+      "category": "lookup",
+      "description": "OAuth authorization code or promo code",
+      "test_values": ["test", "1234"]
+    },
+    {
+      "name": "cmd",
+      "category": "execution",
+      "description": "Command execution parameter",
+      "test_values": ["test", "status"]
+    },
+    {
+      "name": "exec",
+      "category": "execution",
+      "description": "Execute function or script parameter",
+      "test_values": ["test"]
+    },
+    {
+      "name": "command",
+      "category": "execution",
+      "description": "Named system command parameter",
+      "test_values": ["ping", "test"]
+    },
+    {
+      "name": "callback",
+      "category": "execution",
+      "description": "JSONP callback function name",
+      "test_values": ["vortex_cb", "handleResponse"]
+    },
+    {
+      "name": "cb",
+      "category": "execution",
+      "description": "Short JSONP callback parameter",
+      "test_values": ["vortex_cb"]
+    },
+    {
+      "name": "jsonp",
+      "category": "execution",
+      "description": "JSONP handler parameter",
+      "test_values": ["vortex_cb"]
+    },
+    {
+      "name": "action",
+      "category": "execution",
+      "description": "Controller dispatch action name",
+      "test_values": ["test", "view"]
+    },
+    {
+      "name": "method",
+      "category": "execution",
+      "description": "RPC or REST method name override",
+      "test_values": ["test", "get"]
+    },
+    {
+      "name": "func",
+      "category": "execution",
+      "description": "Invoked function name parameter",
+      "test_values": ["test"]
+    },
+    {
+      "name": "do",
+      "category": "execution",
+      "description": "Action selector parameter",
+      "test_values": ["test"]
+    }
+  ]
+}

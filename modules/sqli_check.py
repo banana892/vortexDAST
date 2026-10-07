@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Pattern, Tuple
 from urllib.parse import urlencode, urlparse
 
-from .base import BaseScannerModule, Finding, Severity
+from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
 from core.cvss import build_vector, calculate as cvss_calc
 from core.parser import ParsedForm
@@ -361,6 +361,7 @@ class SQLiCheckModule(BaseScannerModule):
             return Finding(
                 title=f"SQL Injection — {matched_dbms} Error Signature Detected",
                 severity=Severity.HIGH,
+                confidence=Confidence.FIRM,
                 url=url,
                 parameter=parameter,
                 payload=probe["value"],
@@ -399,6 +400,7 @@ class SQLiCheckModule(BaseScannerModule):
             return Finding(
                 title="Potential SQL Injection — Unexpected HTTP 500 on Probe Injection",
                 severity=Severity.MEDIUM,
+                confidence=Confidence.TENTATIVE,
                 url=url,
                 parameter=parameter,
                 payload=probe["value"],
@@ -544,6 +546,7 @@ class SQLiCheckModule(BaseScannerModule):
         return Finding(
             title="Potential Boolean-Blind SQL Injection — Response Length Differential",
             severity=Severity.MEDIUM,
+                confidence=Confidence.TENTATIVE,
             url=url,
             parameter=parameter,
             payload="' AND '1'='1 vs ' AND '1'='2",

@@ -43,7 +43,9 @@ _SQLI_PROBES_PATH = os.path.join(_PAYLOADS_DIR, "sqli_probes.json")
 
 
 def _mock_requester() -> MagicMock:
-    return MagicMock(spec=Requester)
+    req = MagicMock(spec=Requester)
+    req.dispatch_concurrent.side_effect = lambda tasks, **kwargs: [t() for t in tasks]
+    return req
 
 
 def _make_endpoint(
