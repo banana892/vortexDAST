@@ -253,6 +253,7 @@ class CSRFCheckModule(BaseScannerModule):
                     ),
                     cvss_vector=_CVSS_VECTOR_CSRF,
                     cvss_score=_CVSS_SCORE_CSRF,
+                    extra={"module": self.name, "dedup_scope": "origin"},
                 )
             )
 

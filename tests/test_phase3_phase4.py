@@ -13,12 +13,14 @@ Run with:
 
 from __future__ import annotations
 
+import html as html_lib
 import json
 import os
 import sys
 import tempfile
 from typing import Dict, List
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -438,18 +440,12 @@ class TestXSSCheckModule:
         """When a boundary char is reflected verbatim, a finding is returned."""
         module = self._module()
 
-        # Baseline: clean response.
-        baseline_resp = _mock_response("<html>Normal page</html>")
-        # Fuzzed: response contains the raw probe with '<' unencoded.
-        fuzzed_resp = _mock_response(
-            "<html>You searched for: vdastXSS1<vdast — results</html>"
-        )
+        # Vulnerable app: echoes the q parameter back verbatim.
+        def _get(url: str, **kwargs: object) -> tuple:
+            q = parse_qs(urlparse(url).query).get("q", ["hello"])[0]
+            return _mock_response(f"<html>You searched for: {q} — results</html>"), None
 
-        # The module calls get() twice: baseline + per probe.
-        # We return baseline first, then fuzzed for each probe call.
-        module.requester.get.side_effect = [
-            (baseline_resp, None),  # baseline
-        ] + [(fuzzed_resp, None)] * 20  # all probe injections
+        module.requester.get.side_effect = _get
 
         ep = _make_endpoint(
             url="https://target.com/search",
@@ -484,14 +480,10 @@ class TestXSSCheckModule:
         """XSS detection should also work against POST form fields."""
         module = self._module()
 
-        baseline_resp = _mock_response("<html>Submit form</html>")
-        fuzzed_resp = _mock_response(
-            '<html>Hello: vdastXSS3" onmouseover="vdast — welcome</html>'
+        module.requester.get.return_value = (_mock_response("<html>Submit form</html>"), None)
+        module.requester.post.side_effect = lambda url, data=None, **kw: (
+            _mock_response(f"<html>Hello: {data['username']} — welcome</html>"), None
         )
-
-        # Baseline is GET (for URL); POST calls are for form fuzzing.
-        module.requester.get.return_value = (baseline_resp, None)
-        module.requester.post.side_effect = [(fuzzed_resp, None)] * 20
 
         form = ParsedForm(
             action_url="https://target.com/submit",
@@ -505,6 +497,45 @@ class TestXSSCheckModule:
         findings = module.run(ep)
         post_xss = [f for f in findings if "XSS" in f.title]
         assert len(post_xss) >= 1
+
+    def test_unrelated_error_page_is_not_reflection(self) -> None:
+        """A different page full of markup (e.g. a 501 error page) must not count as reflection."""
+        module = self._module()
+        module.requester.get.return_value = (_mock_response("<html>Submit form</html>"), None)
+        module.requester.post.return_value = (_mock_response(
+            "<!DOCTYPE HTML><html><head><title>Error</title></head>"
+            "<body><h1>Error response</h1><p>Error code: 501</p>"
+            "<p>Message: Unsupported method ('POST').</p></body></html>",
+            status=501,
+        ), None)
+        form = ParsedForm(
+            action_url="https://target.com/x", method="POST",
+            fields=[FormField(name="a", field_type="text", default_value="")],
+        )
+        assert module.run(_make_endpoint(url="https://target.com/", forms=[form])) == []
+
+    def test_encoded_reflection_is_not_reported(self) -> None:
+        module = self._module()
+
+        def _get(url: str, **kwargs: object) -> tuple:
+            q = parse_qs(urlparse(url).query).get("q", [""])[0]
+            return _mock_response(f"<html>{html_lib.escape(q, quote=True)}</html>"), None
+
+        module.requester.get.side_effect = _get
+        assert module.run(_make_endpoint(url="https://target.com/s", query_params={"q": ["x"]})) == []
+
+    def test_quick_mode_continues_when_marker_reflected_but_rich_probes_filtered(self) -> None:
+        """An app that strips 'script' and quotes must still get the simpler probes tried."""
+        module = self._module()
+
+        def _get(url: str, **kwargs: object) -> tuple:
+            q = parse_qs(urlparse(url).query).get("q", [""])[0]
+            q = q.replace("script", "").replace('"', "").replace(">", "")
+            return _mock_response(f"<html>{q}</html>"), None
+
+        module.requester.get.side_effect = _get
+        findings = module.run(_make_endpoint(url="https://target.com/s", query_params={"q": ["x"]}))
+        assert any(f.payload == "vdastXSS1<vdast" for f in findings)
 
     def test_get_form_skipped_for_post_fuzzer(self) -> None:
         """GET forms (action=GET) must not be POSTed by the XSS module."""

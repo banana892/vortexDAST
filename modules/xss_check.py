@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import os
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
@@ -64,6 +65,8 @@ _XSS_CANARIES_PATH = os.path.join(_PAYLOADS_DIR, "xss_canaries.json")
 
 # Number of leading probes used in quick-mode reflection screening.
 _QUICK_PROBE_COUNT = 3
+
+_HTML_BREAKOUT_CHARS = frozenset("<>\"'")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CVSS v3.1 vectors for XSS finding types
@@ -313,15 +316,14 @@ class XSSCheckModule(BaseScannerModule):
         Returns
         -------
         (findings, any_reflected)
-            ``any_reflected`` is True when *any* probe produced raw boundary-
-            char presence in the response (even if ultimately encoded / not a
-            true XSS finding).  Used by quick-mode to decide whether to
+            ``any_reflected`` is True when any probe's marker came back in the
+            response, even if its boundary chars were encoded or stripped.  Used by quick-mode to decide whether to
             proceed with the remaining probes.
         """
         findings: List[Finding] = []
         any_reflected = False
 
-        def _run_probe(probe: Dict[str, Any]) -> Optional[Finding]:
+        def _run_probe(probe: Dict[str, Any]) -> Tuple[Optional[Finding], bool]:
             fuzzed = dict(base_params)
             fuzzed[target_param] = probe["value"]
             parsed = urlparse(url)
@@ -330,16 +332,18 @@ class XSSCheckModule(BaseScannerModule):
             response, error = self.requester.get(fuzzed_url)
             if error or response is None:
                 logger.debug("xss GET failed for %s: %s", fuzzed_url, error)
-                return None
+                return None, False
 
-            return self._check_reflection(
-                body=response.text,
+            body = response.text or ""
+            finding = self._check_reflection(
+                body=body,
                 baseline_body=baseline_body,
                 probe=probe,
                 url=fuzzed_url,
                 parameter=target_param,
                 method="GET",
             )
+            return finding, _probe_marker(probe["value"]) in body
 
         if self.use_threads and len(probes) > 1:
             tasks = [lambda p=probe: _run_probe(p) for probe in probes]
@@ -347,18 +351,10 @@ class XSSCheckModule(BaseScannerModule):
         else:
             results = [_run_probe(p) for p in probes]
 
-        for result in results:
-            if result is not None:
-                findings.append(result)
-                any_reflected = True
-
-        # Also check for *any* raw boundary-char increase in the response
-        # (even if it didn't produce a final Finding, e.g. partially encoded).
-        # We approximate: if we got at least one non-None result, reflection
-        # is already flagged.  For the early-exit screen, any_reflected is
-        # True if any probe request returned a non-error response *with*
-        # boundary chars appearing more than in baseline.
-        # (The current logic is conservative: only True if a Finding was made.)
+        for finding, marker_seen in results:
+            if finding is not None:
+                findings.append(finding)
+            any_reflected = any_reflected or marker_seen or finding is not None
 
         return findings, any_reflected
 
@@ -374,7 +370,7 @@ class XSSCheckModule(BaseScannerModule):
         findings: List[Finding] = []
         any_reflected = False
 
-        def _run_probe(probe: Dict[str, Any]) -> Optional[Finding]:
+        def _run_probe(probe: Dict[str, Any]) -> Tuple[Optional[Finding], bool]:
             fuzzed_body = dict(base_body)
             fuzzed_body[target_field] = probe["value"]
 
@@ -384,16 +380,18 @@ class XSSCheckModule(BaseScannerModule):
                     "xss POST failed for %s field=%s: %s",
                     form.action_url, target_field, error,
                 )
-                return None
+                return None, False
 
-            return self._check_reflection(
-                body=response.text,
+            body = response.text or ""
+            finding = self._check_reflection(
+                body=body,
                 baseline_body=baseline_body,
                 probe=probe,
                 url=form.action_url,
                 parameter=target_field,
                 method="POST",
             )
+            return finding, _probe_marker(probe["value"]) in body
 
         if self.use_threads and len(probes) > 1:
             tasks = [lambda p=probe: _run_probe(p) for probe in probes]
@@ -401,10 +399,10 @@ class XSSCheckModule(BaseScannerModule):
         else:
             results = [_run_probe(p) for p in probes]
 
-        for result in results:
-            if result is not None:
-                findings.append(result)
-                any_reflected = True
+        for finding, marker_seen in results:
+            if finding is not None:
+                findings.append(finding)
+            any_reflected = any_reflected or marker_seen or finding is not None
 
         return findings, any_reflected
 
@@ -423,24 +421,28 @@ class XSSCheckModule(BaseScannerModule):
         Analyse a response body for unencoded reflection of the probe's
         boundary characters.
 
-        Returns a Finding only when a boundary char appears *newly* and
-        *more* in raw form than encoded form.
+        Returns a Finding only when the probe's marker is reflected with at
+        least one boundary char immediately intact (i.e. not encoded or stripped).
         """
         reflected_chars: List[str] = []
 
+        # Anchor on the probe itself: the probe text from its unique marker up to
+        # and including each boundary char must appear raw. Counting chars across
+        # the whole body misfires whenever the response is simply a different page.
+        probe_value = probe["value"]
         for char in probe.get("boundary_chars", []):
-            encoded_form = self._encoded_forms.get(char, "")
-            raw_count = body.count(char)
-            encoded_count = body.count(encoded_form) if encoded_form else 0
-            baseline_raw_count = baseline_body.count(char)
-            new_raw_reflections = raw_count - baseline_raw_count
-            if new_raw_reflections > 0 and raw_count > encoded_count:
+            pos = probe_value.find(char)
+            if pos <= 0:
+                continue
+            anchored = probe_value[: pos + 1]
+            if anchored in body and anchored not in baseline_body:
                 reflected_chars.append(char)
 
-        if not reflected_chars:
+        # ';' and '/' survive standard HTML escaping and can't break out of
+        # HTML on their own, so they only corroborate a real breakout char.
+        if not any(c in _HTML_BREAKOUT_CHARS for c in reflected_chars):
             return None
 
-        probe_value = probe["value"]
         evidence = _extract_evidence(body, probe_value)
 
         logger.info(
@@ -511,6 +513,12 @@ def _load_xss_canaries(path: str) -> Tuple[List[Dict[str, Any]], Dict[str, str]]
     except json.JSONDecodeError as exc:
         logger.error("xss_canaries.json parse error: %s", exc)
         return [], {}
+
+
+def _probe_marker(probe_value: str) -> str:
+    """Leading alphanumeric token of a probe (e.g. ``vdastXSS5``), reflected even when the rest is encoded."""
+    match = re.match(r"[A-Za-z0-9]+", probe_value)
+    return match.group(0) if match else probe_value
 
 
 def _extract_evidence(body: str, probe_value: str, context_chars: int = 150) -> str:

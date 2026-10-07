@@ -627,6 +627,7 @@ class HeadersAuditModule(BaseScannerModule):
                         severity=Severity.MEDIUM,
                         confidence=Confidence.CERTAIN,
                         url=url,
+                        parameter=cookie_name,
                         description=(
                             f"The cookie '{cookie_name}' is set without the HttpOnly flag. "
                             "Client-side JavaScript can read this cookie, making it "
@@ -636,7 +637,7 @@ class HeadersAuditModule(BaseScannerModule):
                         evidence=raw_cookie[:200],
                         **_header_cvss("Cookie Missing HttpOnly Flag"),
 
-                        extra={"cookie_name": cookie_name, "missing_flag": "HttpOnly"},
+                        extra={"cookie_name": cookie_name, "dedup_scope": "origin", "missing_flag": "HttpOnly"},
                     )
                 )
 
@@ -647,6 +648,7 @@ class HeadersAuditModule(BaseScannerModule):
                         severity=Severity.MEDIUM,
                         confidence=Confidence.CERTAIN,
                         url=url,
+                        parameter=cookie_name,
                         description=(
                             f"The cookie '{cookie_name}' is set without the Secure flag. "
                             "The cookie may be transmitted over unencrypted HTTP connections."
@@ -655,7 +657,7 @@ class HeadersAuditModule(BaseScannerModule):
                         evidence=raw_cookie[:200],
                         **_header_cvss("Cookie Missing Secure Flag"),
 
-                        extra={"cookie_name": cookie_name, "missing_flag": "Secure"},
+                        extra={"cookie_name": cookie_name, "dedup_scope": "origin", "missing_flag": "Secure"},
                     )
                 )
 
@@ -666,6 +668,7 @@ class HeadersAuditModule(BaseScannerModule):
                         severity=Severity.LOW,
                         confidence=Confidence.CERTAIN,
                         url=url,
+                        parameter=cookie_name,
                         description=(
                             f"The cookie '{cookie_name}' has no SameSite attribute. "
                             "Without SameSite, the cookie is sent with cross-site "
@@ -677,7 +680,7 @@ class HeadersAuditModule(BaseScannerModule):
                         evidence=raw_cookie[:200],
                         **_header_cvss("Cookie Missing SameSite Attribute"),
 
-                        extra={"cookie_name": cookie_name, "missing_flag": "SameSite"},
+                        extra={"cookie_name": cookie_name, "dedup_scope": "origin", "missing_flag": "SameSite"},
                     )
                 )
             else:
@@ -690,6 +693,7 @@ class HeadersAuditModule(BaseScannerModule):
                                 severity=Severity.MEDIUM,
                                 confidence=Confidence.CERTAIN,
                                 url=url,
+                                parameter=cookie_name,
                                 description=(
                                     f"Cookie '{cookie_name}' uses SameSite=None without "
                                     "the Secure attribute. Modern browsers will reject it."
@@ -703,6 +707,7 @@ class HeadersAuditModule(BaseScannerModule):
 
                                 extra={
                                     "cookie_name": cookie_name,
+                                    "dedup_scope": "origin",
                                     "weakness": "SameSite=None without Secure",
                                 },
                             )

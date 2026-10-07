@@ -31,6 +31,7 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from rich.console import Console
 from rich.panel import Panel
@@ -93,6 +94,20 @@ _SEVERITY_ORDER: List[str] = [
     Severity.LOW.value,
     Severity.INFORMATIONAL.value,
 ]
+
+
+def _location_key(finding: Finding) -> str:
+    """
+    Where a finding "lives", ignoring query strings so injected payloads and
+    pagination params don't split one issue into many. Findings tagged
+    ``dedup_scope: origin`` (cookies, site-wide forms) collapse per origin.
+    """
+    parts = urlsplit(finding.url or "")
+    origin = f"{parts.scheme}://{parts.netloc}"
+    extra = finding.extra if isinstance(finding.extra, dict) else {}
+    if extra.get("dedup_scope") == "origin":
+        return origin
+    return origin + (parts.path or "/")
 
 
 _SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
@@ -161,7 +176,8 @@ class Reporter:
     @staticmethod
     def deduplicate_findings(findings: List[Finding]) -> List[Finding]:
         """
-        Deduplicate findings by grouping on (module, url, parameter, finding_title).
+        Deduplicate findings by grouping on (module, location, parameter, title),
+        where location is origin + path (or just origin for site-wide findings).
 
         Multiple probe hits for the same flaw are merged into a single Finding
         containing all observed evidence variants.
@@ -184,10 +200,9 @@ class Reporter:
 
         for finding in findings:
             module = str(finding.extra.get("module", "")) if isinstance(finding.extra, dict) else ""
-            url = finding.url or ""
             param = finding.parameter or ""
             title = finding.title or ""
-            key = (module, url, param, title)
+            key = (module, _location_key(finding), param, title)
 
             if key not in grouped:
                 grouped[key] = []
@@ -249,6 +264,9 @@ class Reporter:
 
             extra_meta: Dict[str, Any] = dict(first.extra) if isinstance(first.extra, dict) else {}
             extra_meta["merged_count"] = len(group)
+            affected_urls = list(dict.fromkeys(f.url for f in group if f.url))
+            if len(affected_urls) > 1:
+                extra_meta["affected_urls"] = affected_urls
             if len(evidences) > 1:
                 extra_meta["evidence_variants"] = evidences
             if len(payloads) > 1:
@@ -363,7 +381,11 @@ class Reporter:
                 detail_table.add_row(
                     str(idx),
                     Text(finding.title, style=style),
-                    Text(finding.url, style="link " + finding.url),
+                    Text(
+                        finding.url + (f"  (+{len(finding.extra['affected_urls']) - 1} more)"
+                                       if isinstance(finding.extra, dict) and finding.extra.get("affected_urls") else ""),
+                        style="link " + finding.url,
+                    ),
                     Text(param_display, style="italic"),
                     Text(cvss_display, style=style),
                     Text(finding.confidence.value, style="dim" if finding.confidence.value == "tentative" else ""),
@@ -480,7 +502,7 @@ class Reporter:
                 rule["properties"]["security-severity"] = f"{score:.1f}"
 
             fingerprint = hashlib.sha256(
-                "|".join([rule_id, finding.url or "", finding.parameter or "", finding.title or ""]).encode()
+                "|".join([rule_id, _location_key(finding), finding.parameter or "", finding.title or ""]).encode()
             ).hexdigest()
 
             message = finding.title
@@ -657,6 +679,9 @@ class Reporter:
         lines += [
             f"| **URL** | `{finding.url}` |",
         ]
+        affected = finding.extra.get("affected_urls", []) if isinstance(finding.extra, dict) else []
+        if affected:
+            lines.append(f"| **Affected URLs ({len(affected)})** | " + "<br>".join(f"`{u}`" for u in affected) + " |")
 
         if finding.parameter:
             lines.append(f"| **Parameter** | `{finding.parameter}` |")
@@ -732,6 +757,15 @@ class Reporter:
                     f_cvss_vector = html.escape(_CVSS_RANGES[sev]["example_vector"])
 
                 merged_count = finding.extra.get("merged_count", 1) if isinstance(finding.extra, dict) else 1
+                f_affected = finding.extra.get("affected_urls", []) if isinstance(finding.extra, dict) else []
+                f_affected_row = (
+                    '<tr><td class="label">Affected URLs ({})</td><td>{}</td></tr>'.format(
+                        len(f_affected),
+                        "<br>".join("<code>" + html.escape(u) + "</code>" for u in f_affected),
+                    )
+                    if f_affected
+                    else ""
+                )
 
                 haystack = f"{finding.id} {finding.title} {finding.url} {finding.parameter or ''} {finding.description or ''} {finding.evidence or ''} {f_module}".lower()
                 escaped_haystack = html.escape(haystack)
@@ -756,6 +790,7 @@ class Reporter:
               <tr><td class="label">Confidence</td><td>{finding.confidence.value.capitalize()}</td></tr>
               <tr><td class="label">Module</td><td><code>{f_module}</code></td></tr>
               <tr><td class="label">Target URL</td><td><code>{f_url}</code></td></tr>
+              {f_affected_row}
               {f'<tr><td class="label">Parameter</td><td><code>{f_param}</code></td></tr>' if f_param else ''}
               {f'<tr><td class="label">Payload</td><td><code>{f_payload}</code></td></tr>' if f_payload else ''}
               <tr><td class="label">CVSS v3.1</td><td><strong>{f_cvss_score}</strong> <code>{f_cvss_vector}</code></td></tr>

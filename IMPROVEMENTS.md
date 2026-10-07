@@ -60,7 +60,7 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 
 ### 2.2 Improve Finding Deduplication & Confidence Scoring
 
-**Status:** ✅ Done (2026-10-07) — `Confidence` enum (`certain`/`firm`/`tentative`) on every finding, set per detection path in all 9 modules; dedup keeps the strongest confidence; shown in terminal, Markdown, HTML, and JSON. Cross-endpoint grouping (one XSS across many URLs) is not done and moves to Phase 2.
+**Status:** ✅ Done (2026-10-07) — `Confidence` enum (`certain`/`firm`/`tentative`) on every finding, set per detection path in all 9 modules; dedup keeps the strongest confidence; shown in terminal, Markdown, HTML, and JSON. Cross-endpoint grouping followed in Phase 2 (see 3.0).
 
 **Problems to Solve:**
 - Same vulnerability reported multiple times (e.g., XSS in parameter `?search=` across 10 endpoints)
@@ -200,6 +200,14 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 **Total Effort:** 8–13 days
 
 ---
+
+### 3.0 Cross-URL Grouping & Detection Accuracy (done 2026-10-07)
+
+- Findings are grouped by origin + path instead of exact URL, so payloads and query strings no longer split one issue into many; all affected URLs are listed in every report format.
+- Cookie-flag and CSRF findings are grouped per origin (`dedup_scope: origin`); cookie findings now carry the cookie name as `parameter`. **Fixed bug:** two different cookies on one page were previously merged into a single finding.
+- SARIF fingerprints use the same stable location, so alerts survive probe-order changes between runs.
+- **Fixed `xss_check` false positives:** reflection is now anchored to the probe marker (previously any extra `<`/`>` in a *different* response — e.g. an error page — counted), and `;`/`/` alone no longer produce HIGH findings on apps that HTML-escape correctly.
+- `xss_check` quick mode now continues when the probe marker is reflected at all, matching its documented behaviour, so filtered-but-vulnerable parameters still get the simpler probes.
 
 ### 3.2 Performance Optimizations
 
