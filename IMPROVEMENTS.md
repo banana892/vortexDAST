@@ -243,7 +243,7 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 - **Effort:** 1 day
 
 #### 3.2.4 Rate Limiting Awareness
-**Status:** ⚠️ Partly in place — urllib3 `Retry` already retries 429/5xx with backoff and honours `Retry-After`. Still missing: telling the user the target is throttling, and slowing the global rate limiter in response.
+**Status:** ✅ Done (2026-10-07) — urllib3 `Retry` absorbs transient 429/5xx. When a 429 (or 503 with `Retry-After`) survives the retries, `Requester` doubles the global request interval (floor 0.2 s even if rate limiting was disabled, cap 2 s), warns once per slowdown, and halves it again after 50 consecutive unthrottled responses until the configured rate is restored. The count is reported as `throttle_events` in scan metadata with an end-of-scan warning.
 
 - [ ] Detect HTTP 429 (Too Many Requests) responses
 - [ ] Auto-backoff and retry with exponential delay

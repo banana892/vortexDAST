@@ -914,6 +914,13 @@ def run_scan(args: argparse.Namespace) -> int:
         "ssl_verify": verify_ssl,
     }
 
+    if requester.throttle_events:
+        scan_meta["throttle_events"] = requester.throttle_events
+        logger.warning(
+            "Target throttled %d request(s). Results may be incomplete — consider a lower --rate-limit.",
+            requester.throttle_events,
+        )
+
     kept_findings, dropped = finding_filter.apply(Reporter.deduplicate_findings(all_findings))
     if dropped:
         scan_meta["findings_filtered_out"] = len(dropped)

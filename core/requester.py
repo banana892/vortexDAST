@@ -203,6 +203,11 @@ class Requester:
             1.0 / rate_limit_rps if rate_limit_rps > 0 else 0.0
         )
 
+        # ── Adaptive throttling ──────────────────────────────────────────────
+        self._base_interval: float = self._min_interval
+        self._ok_streak: int = 0
+        self.throttle_events: int = 0
+
     # ─────────────────────────────────────────────────────────────────────────
     # Cookie and authentication helpers
     # ─────────────────────────────────────────────────────────────────────────
@@ -326,6 +331,47 @@ class Requester:
             logger.debug("Rate-limiter sleeping %.3f s", sleep_for)
             time.sleep(sleep_for)
 
+    #: Interval used when the target throttles while rate limiting is disabled.
+    _THROTTLE_FLOOR_INTERVAL = 0.2
+    #: Never slow below 0.5 rps — keeps slot waits well under ``max_slot_wait``.
+    _THROTTLE_MAX_INTERVAL = 2.0
+    #: Consecutive unthrottled responses before halving the interval again.
+    _RECOVERY_STREAK = 50
+
+    def _record_status(self, status: int, headers: Any) -> None:
+        """Slow the global rate limiter when the target throttles; recover gradually."""
+        # urllib3 has already retried 429/503 by this point, so a final one means
+        # the target is still pushing back.
+        throttled = status == 429 or (status == 503 and "Retry-After" in (headers or {}))
+        message = None
+        with self._rate_lock:
+            if throttled:
+                self.throttle_events += 1
+                self._ok_streak = 0
+                slower = min(
+                    self._THROTTLE_MAX_INTERVAL,
+                    max(self._min_interval * 2, self._THROTTLE_FLOOR_INTERVAL),
+                )
+                if slower > self._min_interval:
+                    self._min_interval = slower
+                    message = (
+                        f"Target is throttling (HTTP {status}) — slowing to "
+                        f"{1 / slower:.1f} req/s."
+                    )
+            elif self._min_interval > self._base_interval:
+                self._ok_streak += 1
+                if self._ok_streak >= self._RECOVERY_STREAK:
+                    self._ok_streak = 0
+                    faster = self._min_interval / 2
+                    # Below the throttle floor, snap back to the configured rate
+                    # (which may be 0 = unlimited).
+                    if faster < max(self._base_interval, self._THROTTLE_FLOOR_INTERVAL):
+                        faster = self._base_interval
+                    self._min_interval = faster
+                    logger.debug("Throttling eased — interval now %.3fs", faster)
+        if message:
+            logger.warning(message)
+
     def _dispatch(
         self,
         method: str,
@@ -351,6 +397,7 @@ class Requester:
                 "%s %s → HTTP %d (%d bytes)",
                 method, url, response.status_code, len(response.content),
             )
+            self._record_status(response.status_code, response.headers)
             return response, None
 
         except requests.exceptions.SSLError as exc:
