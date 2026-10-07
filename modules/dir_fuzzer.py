@@ -28,6 +28,7 @@ import os
 import re
 import threading
 import uuid
+from functools import partial
 from typing import Any, Dict, List, Optional, Pattern, Set, Tuple
 from urllib.parse import urlparse
 
@@ -195,7 +196,7 @@ class DirFuzzerModule(BaseScannerModule):
             return idx, entry, target_url, None if err else resp
 
         results = self.requester.dispatch_concurrent(
-            [lambda i=i, e=e: _probe(i, e) for i, e in enumerate(self._paths)]
+            [partial(_probe, i, e) for i, e in enumerate(self._paths)]
         )
         results.sort(key=lambda r: r[0])
 

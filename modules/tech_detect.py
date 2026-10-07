@@ -27,7 +27,7 @@ import threading
 from typing import Any, Dict, List, Optional, Pattern, Set, Tuple
 from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
@@ -168,26 +168,26 @@ class TechDetectModule(BaseScannerModule):
         lower_headers: Dict[str, str] = {k.lower(): v for k, v in headers.items()}
 
         # ── 2. Header Matching ──────────────────────────────────────────────
-        for sig in self._header_sigs:
-            header_val = lower_headers.get(sig.header)
+        for header_sig in self._header_sigs:
+            header_val = lower_headers.get(header_sig.header)
             if not header_val:
                 continue
 
-            match = sig.regex.search(header_val)
+            match = header_sig.regex.search(header_val)
             if match:
-                dedup_key = (origin, sig.tech)
+                dedup_key = (origin, header_sig.tech)
                 if not self._claim(dedup_key):
                     continue
 
                 version = match.group(1) if match.groups() and match.group(1) else None
-                tech_display = f"{sig.tech} {version}".strip() if version else sig.tech
-                evidence = f"Header '{sig.header}: {header_val}' matched pattern '{sig.regex.pattern}'"
+                tech_display = f"{header_sig.tech} {version}".strip() if version else header_sig.tech
+                evidence = f"Header '{header_sig.header}: {header_val}' matched pattern '{header_sig.regex.pattern}'"
 
                 findings.append(
                     self._create_finding(
                         endpoint_url=endpoint.url,
                         tech_name=tech_display,
-                        category=sig.category,
+                        category=header_sig.category,
                         evidence=evidence,
                         match_type="HTTP Header",
                         version=version,
@@ -205,18 +205,18 @@ class TechDetectModule(BaseScannerModule):
                     cookie_names.add(part.split("=")[0].strip())
 
         for cookie_name in cookie_names:
-            for sig in self._cookie_sigs:
-                if sig.name_regex.search(cookie_name):
-                    dedup_key = (origin, sig.tech)
+            for cookie_sig in self._cookie_sigs:
+                if cookie_sig.name_regex.search(cookie_name):
+                    dedup_key = (origin, cookie_sig.tech)
                     if not self._claim(dedup_key):
                         continue
 
-                    evidence = f"Cookie '{cookie_name}' matched pattern '{sig.name_regex.pattern}'"
+                    evidence = f"Cookie '{cookie_name}' matched pattern '{cookie_sig.name_regex.pattern}'"
                     findings.append(
                         self._create_finding(
                             endpoint_url=endpoint.url,
-                            tech_name=sig.tech,
-                            category=sig.category,
+                            tech_name=cookie_sig.tech,
+                            category=cookie_sig.category,
                             evidence=evidence,
                             match_type="Session Cookie",
                             version=None,
@@ -229,27 +229,27 @@ class TechDetectModule(BaseScannerModule):
 
             # Script tag sources
             script_srcs = [
-                script.get("src", "")
+                str(script.get("src", ""))
                 for script in soup.find_all("script")
-                if script.get("src")
+                if isinstance(script, Tag) and script.get("src")
             ]
             for src in script_srcs:
-                for sig in self._script_sigs:
-                    match = sig.src_regex.search(src)
+                for script_sig in self._script_sigs:
+                    match = script_sig.src_regex.search(src)
                     if match:
-                        dedup_key = (origin, sig.tech)
+                        dedup_key = (origin, script_sig.tech)
                         if not self._claim(dedup_key):
                             continue
 
                         version = match.group(1) if match.groups() and match.group(1) else None
-                        tech_display = f"{sig.tech} {version}".strip() if version else sig.tech
-                        evidence = f"<script src='{src}'> matched pattern '{sig.src_regex.pattern}'"
+                        tech_display = f"{script_sig.tech} {version}".strip() if version else script_sig.tech
+                        evidence = f"<script src='{src}'> matched pattern '{script_sig.src_regex.pattern}'"
 
                         findings.append(
                             self._create_finding(
                                 endpoint_url=endpoint.url,
                                 tech_name=tech_display,
-                                category=sig.category,
+                                category=script_sig.category,
                                 evidence=evidence,
                                 match_type="Script Tag",
                                 version=version,
@@ -257,48 +257,50 @@ class TechDetectModule(BaseScannerModule):
                         )
 
             # DOM & Meta tags
-            for sig in self._dom_sigs:
-                if sig.sig_type == "meta" and sig.attribute:
-                    meta_tags = soup.find_all("meta", attrs={"name": sig.attribute})
-                    meta_tags += soup.find_all("meta", attrs={"property": sig.attribute})
+            for dom_sig in self._dom_sigs:
+                if dom_sig.sig_type == "meta" and dom_sig.attribute:
+                    meta_tags = soup.find_all("meta", attrs={"name": dom_sig.attribute})
+                    meta_tags += soup.find_all("meta", attrs={"property": dom_sig.attribute})
                     for meta in meta_tags:
-                        content = meta.get("content", "")
-                        match = sig.regex.search(content)
+                        if not isinstance(meta, Tag):
+                            continue
+                        content = str(meta.get("content", ""))
+                        match = dom_sig.regex.search(content)
                         if match:
-                            dedup_key = (origin, sig.tech)
+                            dedup_key = (origin, dom_sig.tech)
                             if not self._claim(dedup_key):
                                 continue
 
                             version = match.group(1) if match.groups() and match.group(1) else None
-                            tech_display = f"{sig.tech} {version}".strip() if version else sig.tech
-                            evidence = f"<meta name='{sig.attribute}' content='{content}'> matched '{sig.regex.pattern}'"
+                            tech_display = f"{dom_sig.tech} {version}".strip() if version else dom_sig.tech
+                            evidence = f"<meta name='{dom_sig.attribute}' content='{content}'> matched '{dom_sig.regex.pattern}'"
 
                             findings.append(
                                 self._create_finding(
                                     endpoint_url=endpoint.url,
                                     tech_name=tech_display,
-                                    category=sig.category,
+                                    category=dom_sig.category,
                                     evidence=evidence,
                                     match_type="Meta Tag",
                                     version=version,
                                 )
                             )
-                elif sig.sig_type == "html":
-                    match = sig.regex.search(body)
+                elif dom_sig.sig_type == "html":
+                    match = dom_sig.regex.search(body)
                     if match:
-                        dedup_key = (origin, sig.tech)
+                        dedup_key = (origin, dom_sig.tech)
                         if not self._claim(dedup_key):
                             continue
 
                         version = match.group(1) if match.groups() and match.group(1) else None
-                        tech_display = f"{sig.tech} {version}".strip() if version else sig.tech
-                        evidence = f"DOM body matched pattern '{sig.regex.pattern}'"
+                        tech_display = f"{dom_sig.tech} {version}".strip() if version else dom_sig.tech
+                        evidence = f"DOM body matched pattern '{dom_sig.regex.pattern}'"
 
                         findings.append(
                             self._create_finding(
                                 endpoint_url=endpoint.url,
                                 tech_name=tech_display,
-                                category=sig.category,
+                                category=dom_sig.category,
                                 evidence=evidence,
                                 match_type="DOM Marker",
                                 version=version,

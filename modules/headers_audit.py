@@ -191,7 +191,7 @@ class HeadersAuditModule(BaseScannerModule):
         "Deduplicates per-origin; cookie checks run on every endpoint."
     )
 
-    def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         # Instance-level set so the audit state is scoped to one scan session.
         # We use an instance set (not class-level) so parallel test runs don't

@@ -75,6 +75,7 @@ dev = [
     "jsonschema>=4.0.0",
     "types-requests>=2.31.0",
     "types-PyYAML>=6.0.12",
+    "mypy>=1.0.0",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,6 +122,21 @@ omit   = ["tests/*", "setup.py"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mypy (static type checker) configuration
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.9"
+files = ["core", "modules", "scanner.py"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+# Third-party packages without type stubs.
+[[tool.mypy.overrides]]
+module = ["bs4.*", "weasyprint.*", "yaml.*", "requests.*", "urllib3.*", "rich.*"]
+ignore_missing_imports = true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pyrefly (type-checker / LSP) configuration

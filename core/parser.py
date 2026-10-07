@@ -233,7 +233,7 @@ class HTMLParser:
                 continue
 
             # ── Resolve action URL ────────────────────────────────────────
-            raw_action = form_tag.get("action", "").strip()
+            raw_action = str(form_tag.get("action", "")).strip()
             action_url = urljoin(base_url, raw_action) if raw_action else base_url
 
             # ── Normalise HTTP method ─────────────────────────────────────
@@ -284,7 +284,7 @@ class HTMLParser:
         tag_name = tag.name.lower()
 
         # Only process named fields — unnamed fields are never submitted.
-        name = tag.get("name", "").strip()
+        name = str(tag.get("name", "")).strip()
         if not name:
             return None
 

@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import List, Set
+from typing import Any, List, Set
 from urllib.parse import urlparse
 
 from .base import BaseScannerModule, Confidence, Finding, Severity
@@ -129,7 +129,7 @@ def _is_state_changing_form(action_url: str, method: str) -> bool:
     return False
 
 
-def _has_csrf_token(form) -> bool:  # type: ignore[type-arg]
+def _has_csrf_token(form: Any) -> bool:
     """
     Return ``True`` if the form contains a field whose name matches a known
     CSRF token heuristic.

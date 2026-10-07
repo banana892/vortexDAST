@@ -89,7 +89,7 @@ class TransportCheckModule(BaseScannerModule):
         resp, err = self.requester.get(endpoint.url)
         if err or resp is None:
             return findings
-        content_type = (resp.headers or {}).get("Content-Type", "")
+        content_type = resp.headers.get("Content-Type", "")
         if content_type and "html" not in content_type.lower():
             return findings
 
@@ -134,7 +134,7 @@ class TransportCheckModule(BaseScannerModule):
         if err or resp is None:
             return []  # Port 80 closed or filtered — nothing to downgrade to.
 
-        location = (resp.headers or {}).get("Location", "")
+        location = resp.headers.get("Location", "")
         if 300 <= resp.status_code < 400 and urljoin(http_url, location).lower().startswith("https://"):
             return []
 

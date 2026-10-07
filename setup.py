@@ -39,6 +39,10 @@ EXTRAS_REQUIRE = {
     "dev": [
         "pytest>=8.2.0",
         "pytest-cov>=5.0.0",
+        "jsonschema>=4.0.0",
+        "types-requests>=2.31.0",
+        "types-PyYAML>=6.0.12",
+        "mypy>=1.0.0",
     ],
 }
 
