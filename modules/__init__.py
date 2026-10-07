@@ -3,6 +3,7 @@ VortexDAST – modules/__init__.py
 Exposes all implemented scanner modules for orchestrator discovery.
 """
 
+from .access_control_check import AccessControlCheckModule
 from .base import BaseScannerModule, Confidence, Finding, Severity
 from .headers_audit import HeadersAuditModule
 from .xss_check import XSSCheckModule
@@ -18,6 +19,7 @@ from .template_injection import TemplateInjectionModule
 from .transport_check import TransportCheckModule
 
 __all__ = [
+    "AccessControlCheckModule",
     "BaseScannerModule",
     "Confidence",
     "Finding",

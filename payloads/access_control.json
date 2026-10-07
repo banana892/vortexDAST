@@ -1,0 +1,71 @@
+{
+  "meta": {
+    "description": "Heuristics for the Broken Access Control module. Sensitive-path patterns gate the authenticated-vs-unauthenticated comparison (to keep false positives low on genuinely public pages); login indicators recognise an auth-required / access-denied response; IDOR parameter names mark likely object references for horizontal-access tests.",
+    "safe": true,
+    "references": [
+      "https://owasp.org/Top10/A01_2021-Broken_Access_Control/",
+      "https://owasp.org/www-community/attacks/Forced_browsing"
+    ]
+  },
+  "sensitive_path_patterns": [
+    "/admin",
+    "/administrator",
+    "/dashboard",
+    "/account",
+    "/accounts",
+    "/profile",
+    "/settings",
+    "/manage",
+    "/management",
+    "/private",
+    "/internal",
+    "/user/",
+    "/users/",
+    "/billing",
+    "/invoice",
+    "/orders?/",
+    "/api/.*/(me|self|account|profile|admin)",
+    "/wp-admin",
+    "/config",
+    "/console",
+    "/staff",
+    "/moderator"
+  ],
+  "login_indicators": [
+    "sign in",
+    "log in",
+    "login",
+    "please authenticate",
+    "authentication required",
+    "unauthor",
+    "access denied",
+    "forbidden",
+    "not permitted",
+    "you must be logged in",
+    "session expired",
+    "type=\"password\""
+  ],
+  "idor_param_names": [
+    "id",
+    "uid",
+    "user_id",
+    "userid",
+    "account",
+    "account_id",
+    "acct",
+    "order",
+    "order_id",
+    "invoice",
+    "invoice_id",
+    "doc",
+    "doc_id",
+    "document",
+    "file",
+    "file_id",
+    "pid",
+    "record",
+    "ref",
+    "num",
+    "no"
+  ]
+}

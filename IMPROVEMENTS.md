@@ -182,6 +182,8 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 - **Effort:** 2–3 days
 
 #### 3.1.3 Broken Access Control Module
+**Status:** ✅ Done (2026-10-08) — `modules/access_control_check.py` (`access_control_check`). Implemented at the module level (no crawler refactor): (1) when auth is configured on the requester (cookies / `Authorization` / HTTP auth), sensitive-path endpoints are re-requested through a credential-stripped `Requester` clone; identical 200 content for the anonymous request → HIGH/`firm`, while 401/403, a login-page body, or a redirect to login is treated as correctly protected; (2) numeric object-reference params are incremented/decremented and a differing, comparable-size 200 response → MEDIUM/`tentative` IDOR. Sensitive-path / login / IDOR-name heuristics live in `payloads/access_control.json`; GET-only, thread-safe origin+path dedup. 18 unit tests. **Not done:** true dual-mode crawl (endpoint-list diffing), role-vs-role (vertical) comparison, and non-numeric/UUID object references.
+
 **File:** `modules/access_control_check.py`
 - Run crawler in both authenticated + unauthenticated modes
 - Compare endpoint lists (leaked endpoints in no-auth mode)
