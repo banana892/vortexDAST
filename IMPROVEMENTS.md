@@ -386,51 +386,43 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 
 ### 5.1 API Mode & Orchestration
 
-**Goal:** REST API for programmatic scan submission (not just CLI)
+**Status:** ✅ Done (2026-10-08) — `core/api.py` (Starlette, the ASGI framework FastAPI is built on — no new heavyweight dep) over a CLI-independent engine (`core/engine.py`). Run with `vortex-api` or `uvicorn core.api:app`; install via the `api` extra. 22 unit tests (Starlette `TestClient`, engine mocked — no live traffic). Docs: `docs/API.md`.
 
-**Implementation:**
-- [ ] FastAPI/Flask wrapper around scan engine
-- [ ] Endpoint: `POST /scan` with target + config JSON
-- [ ] Streaming progress via Server-Sent Events (SSE)
-- [ ] Webhook callbacks on scan completion
-- [ ] **Effort:** 3–5 days
+- [x] Web wrapper around a programmatic scan engine (`core/engine.execute_scan`)
+- [x] `POST /scan` with target + config JSON (pydantic-validated), `GET /scan/{id}`, `GET /health`, `GET /modules`
+- [x] Streaming progress via Server-Sent Events (`GET /scan/{id}/events`)
+- [x] Webhook callback on scan completion (`callback_url`, reuses `core.notify`)
+- Jobs run in a background thread pool with an in-memory store. **Not done:** persistent job storage and authentication — add before any multi-user/production exposure.
 
 ---
 
 ### 5.2 Distributed Scanning
 
-**Goal:** Scale scanning across multiple machines
+**Status:** ⏸ Deferred — requires a message broker (RabbitMQ/Redis), neither of which is available in this environment, so a worker/orchestrator split could not be built or verified. The new `core/engine.execute_scan` is the clean unit a future worker would call. **Effort:** 5–7 days.
 
-**Implementation:**
 - [ ] Worker pool (RabbitMQ or Redis-based)
 - [ ] Master orchestrator distributes endpoints to workers
 - [ ] Aggregates findings on master node
-- [ ] **Effort:** 5–7 days
 
 ---
 
 ### 5.3 Machine Learning-Based Anomaly Detection
 
-**Goal:** Detect novel vulnerabilities via HTTP response anomalies
+**Status:** ✅ Core done (2026-10-08) — `core/anomaly.py`. Robust statistics (median/MAD **modified z-score**, Iglewicz–Hoaglin threshold 3.5) rather than a trained model — catches the same response outliers (body size, latency, header count) with no training data and no `scikit-learn` (which isn't installed). `ResponseAnomalyDetector.detect()` does a one-shot pass: the bulk defines "normal", the few outliers are flagged. 9 unit tests (incl. masking and zero-spread edge cases). numpy-backed.
 
-**Implementation:**
-- [ ] Train baseline model on target normal responses
-- [ ] Detect outlier response patterns (unusual headers, body size, timing)
-- [ ] Flag for manual review
-- [ ] **Effort:** 5+ days (ML expertise required)
+- [x] Build a per-feature baseline from normal responses
+- [x] Detect outlier response patterns (body size, latency, header count)
+- [x] Flag for manual review (`AnomalyResult` with per-feature reasons)
+- [ ] **Not done:** wiring the detector into the live scan pipeline as a finding-producing pass (needs the engine to capture per-response features) — the detection core is ready for that follow-up.
 
 ---
 
 ### 5.4 Interactive Scan Replay & Debugging
 
-**Goal:** Web UI for replaying scan payloads, debugging findings
+**Status:** ⏸ Deferred — a full React/Vue SPA is out of scope for this backend repo and can't be meaningfully tested here. A lightweight form of replay already shipped in Phase 2: the HTML report's per-finding **"Reproduce (curl)"** block (§3.3.2). The new REST API (§5.1) is the natural backend a future SPA would consume. **Effort:** 5–7 days.
 
-**Implementation:**
-- [ ] React/Vue frontend for viewing scan results
-- [ ] Click-to-replay functionality (resend probe with payload highlighted)
-- [ ] Request/response viewer with syntax highlighting
-- [ ] Manual payload injection interface
-- [ ] **Effort:** 5–7 days
+- [x] Partial: copy-paste curl reproduction per finding (HTML report)
+- [ ] React/Vue frontend, click-to-replay, request/response viewer, manual payload injection
 
 ---
 

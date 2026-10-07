@@ -44,6 +44,12 @@ EXTRAS_REQUIRE = {
         "types-PyYAML>=6.0.12",
         "mypy>=1.0.0",
     ],
+    "api": [
+        "starlette>=0.37.0",
+        "uvicorn>=0.29.0",
+        "pydantic>=2.0.0",
+        "numpy>=1.24.0",
+    ],
 }
 
 setup(
@@ -111,6 +117,7 @@ setup(
         "console_scripts": [
             "vortex    = scanner:main",
             "vortexdast = scanner:main",
+            "vortex-api = core.api:_cli",
         ],
     },
 )

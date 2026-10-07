@@ -64,6 +64,7 @@ dependencies = [
 [project.scripts]
 vortex    = "scanner:main"
 vortexdast = "scanner:main"
+vortex-api = "core.api:_cli"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Optional dependency groups
@@ -76,6 +77,13 @@ dev = [
     "types-requests>=2.31.0",
     "types-PyYAML>=6.0.12",
     "mypy>=1.0.0",
+]
+# REST API mode (core.api) + statistical anomaly detection (core.anomaly).
+api = [
+    "starlette>=0.37.0",
+    "uvicorn>=0.29.0",
+    "pydantic>=2.0.0",
+    "numpy>=1.24.0",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -135,7 +143,7 @@ no_implicit_optional = true
 
 # Third-party packages without type stubs.
 [[tool.mypy.overrides]]
-module = ["bs4.*", "weasyprint.*", "yaml.*", "requests.*", "urllib3.*", "rich.*"]
+module = ["bs4.*", "weasyprint.*", "yaml.*", "requests.*", "urllib3.*", "rich.*", "starlette.*", "uvicorn.*"]
 ignore_missing_imports = true
 
 # ─────────────────────────────────────────────────────────────────────────────
