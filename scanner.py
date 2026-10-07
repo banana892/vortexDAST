@@ -72,6 +72,13 @@ if _ROOT not in sys.path:
 from core import crawl_cache
 from core.crawler import CrawlResult, CrawledEndpoint, Crawler
 from core.endpoint_group import group_endpoints
+from core.profiles import (
+    PROFILE_NAMES,
+    ConfigError,
+    apply_env_overrides,
+    apply_profile,
+    validate_config,
+)
 from core.notify import WEBHOOK_FORMATS, build_payload, send_webhook
 from core.filters import SEVERITY_ORDER, FilterConfigError, FindingFilter, load_suppression_rules
 from core.reporter import Reporter
@@ -388,13 +395,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--threads", "-t",
         type=int,
-        default=10,
+        default=None,
         metavar="N",
         help=(
             "Number of concurrent worker threads used by scanner modules. "
             "Higher values reduce wall-clock time for probe-heavy modules (XSS, SQLi, SSRF). "
-            "Default: 10. Recommended range: 5–20. "
+            "Default: 10 (or the --profile / config value). Recommended range: 5–20. "
             "See also: --concurrency (alias that takes precedence)."
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        choices=PROFILE_NAMES,
+        default=None,
+        help=(
+            "Pre-built settings bundle: 'aggressive' (fast, noisy), 'balanced' "
+            "(default-like), or 'quiet' (slow, gentle). Explicit flags and "
+            "VORTEX_* env vars still override it."
         ),
     )
     parser.add_argument(
@@ -732,6 +749,18 @@ def run_scan(args: argparse.Namespace) -> int:
 
     # ── Load configuration ─────────────────────────────────────────────────
     config = _load_config(args.config)
+
+    # ── Layer profile + env overrides onto config, then validate ──────────
+    # Precedence: CLI flag > VORTEX_* env > --profile > config.yaml > default.
+    try:
+        if getattr(args, "profile", None):
+            apply_profile(config, args.profile)
+        apply_env_overrides(config)
+        validate_config(config)
+    except ConfigError as exc:
+        logger.error("Configuration error: %s", exc)
+        return 1
+
     req_cfg = config.get("requester", {})
     crawler_cfg = config.get("crawler", {})
     scope_cfg = config.get("scope", {})
@@ -748,8 +777,13 @@ def run_scan(args: argparse.Namespace) -> int:
     verify_ssl: bool = not args.insecure
     proxy: Optional[str] = args.proxy or req_cfg.get("proxy")
 
-    # --concurrency takes precedence over --threads when both are given.
-    threads: int = max(1, args.concurrency if args.concurrency is not None else args.threads)
+    # Thread count precedence: --concurrency > --threads > config/profile/env > 10.
+    _threads_default = int(req_cfg.get("concurrency", 10))
+    threads: int = max(1, (
+        args.concurrency if args.concurrency is not None
+        else args.threads if args.threads is not None
+        else _threads_default
+    ))
 
     # --timeout overrides config.yaml value.
     timeout: int = (

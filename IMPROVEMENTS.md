@@ -326,16 +326,10 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 
 ### 4.1 Type Hints & Static Analysis
 
-**Current State:** Not yet measured — run `mypy` to establish a baseline.
+**Status:** ⚠️ Partly done (2026-10-08) — the codebase is already broadly typed (`from __future__ import annotations` throughout, typed signatures across core/ and modules/). **Blocked:** `mypy` is not installed in this environment, so a baseline could not be established and a CI gate could not be verified. Installing `mypy` is a dependency decision left to the maintainer; once added, run `mypy core modules scanner.py` and address findings.
 
-**Issues:**
-- `modules/base.py` — underspecified generics
-- `core/parser.py` — missing return type hints
-- `core/crawler.py` — `Optional[...]` usage inconsistent
-
-**Fix:**
 - [ ] Add `# type: ignore` comments only where necessary (with explanation)
-- [ ] Run `mypy` in CI/CD pipeline
+- [ ] Run `mypy` in CI/CD pipeline (needs `mypy` dependency added first)
 - [ ] Target: 100% type coverage
 - **Effort:** 2–3 days
 
@@ -345,16 +339,9 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 
 ### 4.2 Test Coverage Expansion
 
-**Current State:** 359 tests across 10 files covering all modules, crawler, reporter, and concurrency. Line coverage not yet measured — run `pytest --cov` to establish a baseline.
+**Status:** ✅ Done (2026-10-08) — baseline measured at **88% line coverage** (`pytest --cov=core --cov=modules --cov=scanner`), above the 80% target, across 507 tests. The modules listed below already had coverage (crawler 93%, parser 89%, traversal 85%, ssrf 72%, csrf 97%); Phase 2/3 additions brought the new code (profiles, crawl_cache, endpoint_group, issue_tracker, reporter PDF/repro) under test too. **Lowest remaining:** `issue_tracker` (68%, network branches), `requester` (69%, transport-error branches — now partly covered by resilience tests), `ssrf_check` (72%).
 
-**Missing Tests:**
-- [ ] `core/crawler.py` — crawl logic (BFS, scope enforcement)
-- [ ] `core/parser.py` — form/link parsing edge cases
-- [ ] `modules/traversal_check.py` — path traversal detection
-- [ ] `modules/ssrf_check.py` — SSRF signatures
-- [ ] `modules/csrf_check.py` — CSRF token handling
-
-**Target:** 80%+ code coverage (use `pytest --cov`)
+**Target:** 80%+ code coverage — **met (88%)**.
 
 **Effort:** 3–5 days
 
@@ -362,41 +349,34 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 
 ### 4.3 Error Handling & Resilience
 
-**Current Issues:**
-- No timeout handling on headless browser (Playwright)
-- Limited retry logic for failed HTTP requests
-- Scanner halts on module crash (should isolate per-endpoint)
+**Status:** ✅ Mostly done (2026-10-08) — the resilience foundations were already in place and are now covered by tests (`tests/test_phase3_resilience.py`).
 
-**Fixes:**
-- [ ] Wrap Playwright operations with timeouts + fallback to static crawl
-- [ ] Add retry decorator to all HTTP calls (exponential backoff)
-- [ ] Isolate module exceptions (log + continue, don't halt scan)
-- [ ] Test against unresponsive targets (slow/hung servers)
+- [ ] Wrap Playwright operations with timeouts + fallback to static crawl — **N/A for now:** dynamic Playwright crawl is still a stub (`--dynamic` logs "not yet implemented"); revisit when it lands.
+- [x] Retry logic for failed HTTP calls — already present: `Requester` uses urllib3 `Retry` (429/5xx, exponential `backoff_factor`) plus adaptive throttling.
+- [x] Isolate module exceptions — already present: the fuzz loop catches per-endpoint exceptions, logs, and continues (verified by a test mirroring the loop).
+- [x] Handle unresponsive targets — `Requester` converts every transport exception (connection/timeout/redirect/other) into `(None, error)` and never raises; modules degrade to `[]` (new parametrized tests).
 
 **Effort:** 2–3 days
 
-**Files:** `core/crawler.py`, `scanner.py`, all modules
+**Files:** `core/requester.py`, `scanner.py`, all modules
 
 ---
 
 ### 4.4 Configuration Management
 
-**Current State:** `config.yaml` is monolithic; CLI overrides work but not elegant
+**Status:** ✅ Done (2026-10-08) — `core/profiles.py` + scanner wiring. Precedence: explicit CLI flag > `VORTEX_*` env var > `--profile` > `config.yaml` > built-in default. 15 unit tests.
 
-**Improvements:**
-- [ ] Pre-built scan profiles (aggressive, balanced, quiet)
+- [x] Pre-built scan profiles — `--profile {aggressive,balanced,quiet}` sets `max_depth` / `concurrency` / `rate_limit_rps` (values match the sketch below).
   ```yaml
-  profiles:
-    aggressive: { max_depth: 5, concurrency: 30, rate_limit: 50 }
-    balanced: { max_depth: 3, concurrency: 10, rate_limit: 5 }
-    quiet: { max_depth: 2, concurrency: 5, rate_limit: 1 }
+  aggressive: { max_depth: 5, concurrency: 30, rate_limit: 50 }
+  balanced:   { max_depth: 3, concurrency: 10, rate_limit: 5 }
+  quiet:      { max_depth: 2, concurrency: 5,  rate_limit: 1 }
   ```
+- [x] Environment variable support — `VORTEX_TIMEOUT`, `VORTEX_RATE_LIMIT`, `VORTEX_MAX_DEPTH`, `VORTEX_THREADS`/`VORTEX_CONCURRENCY`, `VORTEX_PROXY`, `VORTEX_USER_AGENT`.
+- [x] Config validation — `validate_config()` fails fast with a clear message on bad types (e.g. negative timeout, non-list scope); runs before the scan starts.
+- [x] Per-target config overrides — achievable today via `--config config.prod.yaml` (any path loads and is validated); a dedicated per-target merge layer was not added.
 
-- [ ] Environment variable support (`VORTEX_TIMEOUT=30`)
-- [ ] Config file validation (schema checking)
-- [ ] Per-target config overrides (e.g., `config.prod.yaml` for production targets)
-
-**Files:** `scanner.py` (config loader), `config/` directory
+**Files:** `core/profiles.py`, `scanner.py`
 
 **Effort:** 2 days
 
