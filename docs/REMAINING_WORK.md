@@ -51,7 +51,7 @@ These extend existing, working modules — none are blockers.
 | Item | Status | Why it's open / notes | Effort |
 |------|--------|-----------------------|--------|
 | Distributed scanning (worker pool + orchestrator) | Deferred | Needs a message broker (Redis/RabbitMQ) not available in this environment. `core.engine.execute_scan` is the clean unit a worker would call | L |
-| Wire anomaly detector into the live scan pipeline | **Shipped** | Features collected per-endpoint and fed into `ResponseAnomalyDetector` in `core/engine.py` | M |
+| Wire anomaly detector into the live scan pipeline | **Shipped** | Features collected per-endpoint and fed into `ResponseAnomalyDetector` in `core/engine.py` and `scanner.py` (with `--disable-anomaly-detection` CLI flag) | M |
 | Interactive replay & debugging SPA | Deferred | A React/Vue frontend is a separate project; the REST API (`core/api.py`) is the backend it would consume | L |
 | API: persistent job storage + authentication | **Shipped** | `APIKeyMiddleware` + file-backed atomic `JobStore` in `core/api.py` | M |
 

@@ -408,12 +408,12 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 
 ### 5.3 Machine Learning-Based Anomaly Detection
 
-**Status:** ✅ Core done (2026-10-08) — `core/anomaly.py`. Robust statistics (median/MAD **modified z-score**, Iglewicz–Hoaglin threshold 3.5) rather than a trained model — catches the same response outliers (body size, latency, header count) with no training data and no `scikit-learn` (which isn't installed). `ResponseAnomalyDetector.detect()` does a one-shot pass: the bulk defines "normal", the few outliers are flagged. 9 unit tests (incl. masking and zero-spread edge cases). numpy-backed.
+**Status:** ✅ **Fully shipped** (2026-10-08) — `core/anomaly.py` + wired into `core/engine.py` and `scanner.py` (2026-10-08). Robust statistics (median/MAD **modified z-score**, Iglewicz–Hoaglin threshold 3.5) rather than a trained model — catches the same response outliers (body size, latency, header count) with no training data and no `scikit-learn` (which isn't installed). `ResponseAnomalyDetector.detect()` does a one-shot pass: the bulk defines "normal", the few outliers are flagged. 10 unit tests (incl. masking, zero-spread edge cases, and CLI flag parsing). numpy-backed. CLI integration adds `--disable-anomaly-detection` flag (opt-out, enabled by default).
 
 - [x] Build a per-feature baseline from normal responses
 - [x] Detect outlier response patterns (body size, latency, header count)
 - [x] Flag for manual review (`AnomalyResult` with per-feature reasons)
-- [ ] **Not done:** wiring the detector into the live scan pipeline as a finding-producing pass (needs the engine to capture per-response features) — the detection core is ready for that follow-up.
+- [x] Wire the detector into the live scan pipeline as a finding-producing pass (CLI scanner + programmatic API)
 
 ---
 
