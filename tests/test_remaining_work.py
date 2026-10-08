@@ -204,6 +204,20 @@ class TestPhase3AnomalyPipeline:
         anomaly_findings = [f for f in report.findings if f.title == "Response Anomaly Detected"]
         assert len(anomaly_findings) >= 1
 
+    def test_cli_scanner_anomaly_flag_parsing(self) -> None:
+        """Verify that the CLI scanner accepts the --disable-anomaly-detection flag."""
+        import scanner as scanner_module  # noqa: PLC0415
+
+        parser = scanner_module._build_parser()
+
+        # Default: anomaly detection enabled
+        args = parser.parse_args(["-u", "http://test.com"])
+        assert args.disable_anomaly_detection is False
+
+        # With flag: anomaly detection disabled
+        args = parser.parse_args(["-u", "http://test.com", "--disable-anomaly-detection"])
+        assert args.disable_anomaly_detection is True
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 4a: SSTI Header vectors & logic-less engine tests

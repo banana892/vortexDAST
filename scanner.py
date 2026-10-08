@@ -79,6 +79,7 @@ from core.profiles import (
     apply_profile,
     validate_config,
 )
+from core.engine import _anomaly_findings, _collect_response_features
 from core.notify import WEBHOOK_FORMATS, build_payload, send_webhook
 from core.filters import SEVERITY_ORDER, FilterConfigError, FindingFilter, load_suppression_rules
 from core.reporter import Reporter
@@ -619,6 +620,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Webhook body: 'json' (structured summary) or 'slack' (incoming-webhook text). Default: json.",
     )
     parser.add_argument(
+        "--disable-anomaly-detection",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable statistical anomaly detection (unusual response sizes, latencies, headers). "
+            "Anomaly findings are INFORMATIONAL and intended for manual review. "
+            "Default: enabled."
+        ),
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         default=False,
@@ -1046,6 +1057,21 @@ def run_scan(args: argparse.Namespace) -> int:
                 )
                 all_findings.extend(module_findings)
 
+        # ── Phase 4: Statistical anomaly detection ─────────────────────────────
+        if not args.disable_anomaly_detection and endpoints:
+            try:
+                urls = [ep.url for ep in endpoints]
+                features, valid_urls = _collect_response_features(requester, urls)
+                if features:  # Only run detector if we have features
+                    anomaly_findings = _anomaly_findings(features, valid_urls)
+                    if anomaly_findings:
+                        logger.info(
+                            f"  [bold magenta]anomaly[/bold magenta] → [bold]{len(anomaly_findings)}[/bold] finding(s)"
+                        )
+                        all_findings.extend(anomaly_findings)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Anomaly detection failed: %s", exc)
+
     except KeyboardInterrupt:
         logger.warning("Scan interrupted by user.")
     finally:
@@ -1064,6 +1090,7 @@ def run_scan(args: argparse.Namespace) -> int:
         "timeout_s": timeout,
         "rate_limit_rps": rate_limit_rps,
         "ssl_verify": verify_ssl,
+        "anomaly_detection": not args.disable_anomaly_detection,
     }
 
     if requester.throttle_events:
