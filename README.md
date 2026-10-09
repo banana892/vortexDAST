@@ -148,6 +148,18 @@ options:
   --auth-user USER      Username for HTTP Basic / Digest authentication.
   --auth-pass PASS      Password for HTTP Basic / Digest authentication (pair
                         with --auth-user).
+  --login-url URL       Form-login URL. The scanner submits --login-data here
+                        before crawling and reuses the session cookie(s).
+  --login-data FIELDS   Login form fields as 'name=value&name2=value2', e.g.
+                        'username=admin&password=s3cret'. Requires --login-url.
+  --login-method M      HTTP method for the login request (POST default, GET).
+  --login-success-text TEXT
+                        Substring that must appear on successful login.
+  --login-failure-text TEXT
+                        Substring that marks a failed login.
+  --logged-out-text TEXT
+                        Substring whose appearance mid-scan means the session
+                        was lost, triggering automatic re-authentication.
   --min-severity LEVEL  Only report findings at or above this severity
                         (critical, high, medium, low, informational).
   --min-confidence LEVEL
@@ -169,6 +181,9 @@ Examples:
   vortex -u http://target.com --port-scan
   vortex -u http://target.com --ports 22,80,443,3306,6379,8000-8100
   vortex -u http://target.com --subnet 192.168.1.0/24 --ports 22,80,443,3306
+  vortex -u https://app.local/ --login-url https://app.local/login \
+         --login-data "username=admin&password=s3cret" \
+         --login-success-text "Sign out" --logged-out-text "Please log in"
   vortex -u http://target.com --max-endpoints 10 --timeout 5 --rate-limit 10
   vortexdast -u http://target.com --dynamic --verbose
   vortex --list-themes

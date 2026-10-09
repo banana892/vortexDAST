@@ -78,6 +78,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from core import crawl_cache
+from core.auth import FormLoginAuthenticator, parse_login_data
 from core.crawler import CrawlResult, CrawledEndpoint, Crawler
 from core.endpoint_group import group_endpoints
 from core.profiles import (
@@ -702,6 +703,51 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PASS",
         help="Password for HTTP Basic / Digest authentication (pair with --auth-user).",
     )
+    parser.add_argument(
+        "--login-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "Form-login URL. The scanner submits --login-data here before "
+            "crawling and reuses the resulting session cookie(s)."
+        ),
+    )
+    parser.add_argument(
+        "--login-data",
+        default=None,
+        metavar="FIELDS",
+        help=(
+            "Login form fields as 'name=value&name2=value2', e.g. "
+            "'username=admin&password=s3cret'. Requires --login-url."
+        ),
+    )
+    parser.add_argument(
+        "--login-method",
+        choices=["POST", "GET", "post", "get"],
+        default="POST",
+        help="HTTP method for the login request (default: POST).",
+    )
+    parser.add_argument(
+        "--login-success-text",
+        default=None,
+        metavar="TEXT",
+        help="Substring that must appear in a successful login response (e.g. 'Sign out').",
+    )
+    parser.add_argument(
+        "--login-failure-text",
+        default=None,
+        metavar="TEXT",
+        help="Substring that marks a failed login (e.g. 'Invalid credentials').",
+    )
+    parser.add_argument(
+        "--logged-out-text",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Substring whose appearance mid-scan means the session was lost, "
+            "triggering automatic re-authentication (e.g. 'Please log in')."
+        ),
+    )
 
     # ── Finding filters ─────────────────────────────────────────────────────────
     parser.add_argument(
@@ -1165,6 +1211,43 @@ def run_scan(args: argparse.Namespace) -> int:
         auth_headers=auth_headers or None,
         http_auth=http_auth,
     )
+
+    # ── Form login (optional) ──────────────────────────────────────────────
+    # Authenticate before crawling so every request carries the session, and
+    # wire session-loss recovery so a dropped session is re-established mid-scan
+    # rather than silently voiding every subsequent finding.
+    if getattr(args, "login_url", None):
+        if not getattr(args, "login_data", None):
+            print("[ERROR] --login-url requires --login-data.", file=sys.stderr)
+            return 2
+        try:
+            credentials = parse_login_data(args.login_data)
+        except ValueError as exc:
+            print(f"[ERROR] invalid --login-data: {exc}", file=sys.stderr)
+            return 2
+        authenticator = FormLoginAuthenticator(
+            login_url=args.login_url,
+            credentials=credentials,
+            method=args.login_method,
+            success_text=args.login_success_text,
+            failure_text=args.login_failure_text,
+            logged_out_text=args.logged_out_text,
+        )
+        if not authenticator.login(requester):
+            ui.status(
+                console, theme, "error",
+                "Authentication failed",
+                "login was rejected — aborting (scanning unauthenticated would be misleading)",
+            )
+            requester.close()
+            return 1
+        ui.status(console, theme, "ok", "Authenticated", f"session established via {args.login_url}")
+        # Recovery only makes sense when a logged-out signal is configured.
+        if args.logged_out_text:
+            requester.set_session_recovery(
+                authenticator.is_session_valid,
+                lambda: authenticator.reauthenticate(requester),
+            )
 
     scan_start = time.monotonic()
 

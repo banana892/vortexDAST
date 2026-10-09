@@ -136,6 +136,16 @@ class Requester:
         self.max_workers = max_workers
         self._max_slot_wait = max_slot_wait
 
+        # ── Session-recovery hooks (set via set_session_recovery) ──────────
+        #: (response) -> bool: False means the session was lost.
+        self._session_validator: Optional[Callable[[Any], bool]] = None
+        #: () -> bool: re-authenticate; True on success.
+        self._reauth_callback: Optional[Callable[[], bool]] = None
+        #: Serialises re-auth and guards against recursion (the login request
+        #: itself flows back through _dispatch).
+        self._reauth_lock = threading.Lock()
+        self._reauthenticating: bool = False
+
         if not verify_ssl:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             logger.warning(
@@ -372,6 +382,76 @@ class Requester:
         if message:
             logger.warning(message)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Authenticated-session recovery
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def set_session_recovery(
+        self,
+        validator: Callable[[Any], bool],
+        reauth: Callable[[], bool],
+    ) -> None:
+        """
+        Enable transparent re-authentication on session loss.
+
+        ``validator(response)`` returns ``False`` when a response shows the
+        session has expired; ``reauth()`` re-authenticates (returning success)
+        and leaves fresh cookies on this requester's session. Wired here so a
+        dropped session is recovered at the single request choke point rather
+        than in every module. See :mod:`core.auth`.
+        """
+        self._session_validator = validator
+        self._reauth_callback = reauth
+
+    def _maybe_recover_session(
+        self,
+        method: str,
+        url: str,
+        response: "requests.Response",
+        kwargs: Dict[str, Any],
+    ) -> "requests.Response":
+        """
+        If a session-loss is detected on ``response``, re-authenticate once and
+        replay the original request. Returns the replayed response on success,
+        else the original. No-op unless :meth:`set_session_recovery` was used.
+        """
+        if self._session_validator is None or self._reauth_callback is None:
+            return response
+        # Never recurse: the login request itself passes through _dispatch.
+        if self._reauthenticating:
+            return response
+        try:
+            if self._session_validator(response):
+                return response
+        except Exception as exc:  # noqa: BLE001 — a bad validator must not crash a scan
+            logger.debug("session validator raised: %s", exc)
+            return response
+
+        with self._reauth_lock:
+            # Another thread may have already recovered the session; re-check
+            # by replaying is cheaper than tracking shared state, so proceed.
+            self._reauthenticating = True
+            try:
+                recovered = bool(self._reauth_callback())
+            except Exception as exc:  # noqa: BLE001
+                logger.error("re-authentication raised: %s", exc)
+                recovered = False
+            finally:
+                self._reauthenticating = False
+
+        if not recovered:
+            logger.error("session recovery failed; continuing unauthenticated")
+            return response
+
+        # Replay the original request once with the refreshed session.
+        try:
+            replay = self.session.request(method, url, **kwargs)
+            self._record_status(replay.status_code, replay.headers)
+            return replay
+        except requests.exceptions.RequestException as exc:
+            logger.debug("replay after re-auth failed: %s", exc)
+            return response
+
     def _dispatch(
         self,
         method: str,
@@ -398,6 +478,7 @@ class Requester:
                 method, url, response.status_code, len(response.content),
             )
             self._record_status(response.status_code, response.headers)
+            response = self._maybe_recover_session(method, url, response, kwargs)
             return response, None
 
         except requests.exceptions.SSLError as exc:

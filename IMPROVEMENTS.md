@@ -1,6 +1,6 @@
 # VortexDAST — Improvement Roadmap
 
-**Last Updated:** 2026-10-08
+**Last Updated:** 2026-10-09
 
 ---
 
@@ -14,6 +14,83 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 - 📊 Expand vulnerability coverage (new detector modules)
 - ⚡ Optimize scan performance (batching, caching, parallelization)
 - 📋 Enhance reporting and integration capabilities
+
+---
+
+## 1A. VAPT Readiness — Gaps Against a Real Target
+
+**Added:** 2026-10-09. Driven by attempting a VAPT against a live modern web
+application (Next.js SPA on Vercel, authenticated assignment platform). This
+section records the gaps that block the tool from assessing a modern,
+authenticated, API-driven app — as opposed to a server-rendered no-auth site,
+which it already handles. Items are ordered by how much each one blinds the
+assessment.
+
+### Blocking gaps for modern (SPA + auth + API) targets
+
+1. **Authenticated scanning** — ✅ *scaffolded 2026-10-09.* `core/auth.py` adds
+   `FormLoginAuthenticator` (form login → session cookie reused for the scan)
+   and session-loss detection + transparent re-auth, wired at the single
+   request choke point via `Requester.set_session_recovery`. CLI:
+   `--login-url`, `--login-data`, `--login-method`, `--login-success-text`,
+   `--login-failure-text`, `--logged-out-text`.
+   - *Still open (follow-ups):* OAuth2/OIDC redirect flows, CSRF-token
+     harvesting from the login page, multi-step / MFA logins, and a
+     multi-role authorization matrix. The class is structured so these slot in
+     as extra `login` strategies without touching the recovery plumbing.
+
+2. **No JS/SPA rendering.** `--dynamic` is a stub (`scanner.py` ~L1103); the
+   promised `core/dom_watcher.py` does not exist. The BeautifulSoup crawler
+   sees the initial HTML shell and misses every client-routed page and
+   `fetch()`/XHR call. On a client-rendered app a scan looks deceptively
+   empty — thin results ≠ clean app. Needs a real Playwright/CDP crawl worker.
+
+3. **No API / JSON body testing.** No OpenAPI/Swagger/Postman import, no REST
+   path-parameter fuzzing, and most modules mutate only URL query params and
+   HTML form fields (NoSQLi's `_fuzz_json_body` is the lone exception). The
+   `/api/*` surface of a modern app goes untested.
+
+### Core detection gaps (any serious VAPT needs these)
+
+4. **No Out-of-Band (OAST) testing.** Blind SSRF, blind SQLi, blind RCE and
+   XXE are undetectable without a callback listener (interactsh/Collaborator).
+   Biggest single capability win after the three above.
+
+5. **Missing detector modules entirely:** OS command injection, open redirect,
+   XXE, CORS misconfiguration, file-upload weaknesses — 0% coverage today.
+
+6. **Shallow existing detectors:** `modules/sqli_check.py` has no time-based
+   blind test (no `sleep`/timing differential); `modules/traversal_check.py`
+   inspects GET query params only (misses POST/JSON bodies);
+   `modules/ssrf_check.py` is keyword-gated on parameter names and in-band only.
+
+### VAPT-deliverable gaps (findings must be defensible)
+
+7. **No raw request/response capture** on `Finding` — only a reconstructed
+   curl. A VAPT report needs the actual HTTP request/response PoC per finding.
+   (Already noted in `docs/REMAINING_WORK.md`.)
+
+8. **Known false-positive sources** that undermine a client-facing report:
+   the Firebase NoSQL pattern list includes the broad string `"Database Error"`
+   (collides with SQL error pages → cross-category FP in
+   `payloads/nosql_probes.json`), and the IDOR heuristic flags public GET
+   parameters as object references.
+
+### Operational / safety (bites you scanning a live hosted app)
+
+9. **Redirect scope escape.** `Requester` follows redirects with the `requests`
+   default (`allow_redirects=True`) and never consults `ScopeGuard`, so an
+   off-scope 301/302 can carry injection probes to an unintended host. Must be
+   fixed before any external engagement.
+
+10. **No edge-WAF-aware backoff.** Beyond the basic 429-halving in
+    `core/requester.py`, there is no detection of a CDN/WAF throttling the scan
+    (e.g. Vercel/Cloudflare rate-limits), which both wastes requests and risks
+    getting the scanning account flagged.
+
+**Priority call:** items **1, 2, 3** are what stand between "scans the site"
+and "assesses the site" for a modern target. **9** is a prerequisite for any
+authorised external engagement. **4** is the highest-leverage detection upgrade.
 
 ---
 
@@ -550,3 +627,6 @@ For contributors implementing these improvements:
 
 **Document History:**
 - 2026-10-07 — Initial roadmap creation
+- 2026-10-09 — Added §1A VAPT-readiness gaps; scaffolded authenticated
+  scanning (form login + session-loss re-auth) and host-scoped port/subnet
+  scanning.
