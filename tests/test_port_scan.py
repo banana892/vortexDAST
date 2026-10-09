@@ -11,7 +11,8 @@ import pytest
 
 import scanner
 from core.crawler import CrawledEndpoint
-from scanner import _parse_port_list, _parse_subnet
+from scanner import _clamp_subnet_workers, _parse_port_list, _parse_subnet
+from scanner import _MAX_SUBNET_WORKERS
 
 
 def _make_endpoint(url: str, depth: int = 0) -> CrawledEndpoint:
@@ -121,6 +122,24 @@ def test_parse_subnet_rejects_over_cap():
 def test_parse_subnet_rejects_garbage():
     with pytest.raises(SystemExit):
         _parse_subnet("not-a-cidr", 1024)
+
+
+# ── Subnet worker clamp ─────────────────────────────────────────────────────
+
+
+def test_clamp_subnet_workers_within_range():
+    assert _clamp_subnet_workers(100) == 100
+    assert _clamp_subnet_workers(1) == 1
+
+
+def test_clamp_subnet_workers_caps_high():
+    assert _clamp_subnet_workers(100_000) == _MAX_SUBNET_WORKERS
+    assert _MAX_SUBNET_WORKERS == 512
+
+
+def test_clamp_subnet_workers_floor():
+    assert _clamp_subnet_workers(0) == 1
+    assert _clamp_subnet_workers(-5) == 1
 
 
 # ── Subnet sweep behaviour ─────────────────────────────────────────────────

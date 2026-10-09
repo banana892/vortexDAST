@@ -167,6 +167,10 @@ MODULE_REGISTRY: Dict[str, Type[BaseScannerModule]] = _discover_modules()
 #: the operator must opt in explicitly.
 _OPT_IN_MODULES: frozenset = frozenset({"port_scan"})
 
+#: Hard upper bound on --subnet-workers, guarding against local ephemeral-port
+#: / file-descriptor exhaustion from an over-large socket pool.
+_MAX_SUBNET_WORKERS: int = 512
+
 _DEFAULT_CONFIG_PATH = os.path.join(_ROOT, "config.yaml")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -565,8 +569,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=100,
         metavar="N",
         help=(
-            "Concurrent socket probes for a --subnet sweep (default: 100). "
-            "Host x port probes share one pool so down-host timeouts overlap."
+            "Concurrent socket probes for a --subnet sweep (default: 100, "
+            "capped at 512). Host x port probes share one pool so down-host "
+            "timeouts overlap."
         ),
     )
     parser.add_argument(
@@ -946,6 +951,21 @@ def _parse_subnet(raw: Optional[str], max_hosts: int) -> Optional[List[str]]:
     return hosts
 
 
+def _clamp_subnet_workers(requested: int) -> int:
+    """
+    Clamp the requested subnet-sweep worker count to ``[1, _MAX_SUBNET_WORKERS]``.
+
+    Guards against local ephemeral-port / file-descriptor exhaustion from an
+    over-large socket pool. Warns (once) when the request is clamped down.
+    """
+    if requested > _MAX_SUBNET_WORKERS:
+        logger.warning(
+            "--subnet-workers %d exceeds the cap; clamping to %d.",
+            requested, _MAX_SUBNET_WORKERS,
+        )
+    return max(1, min(_MAX_SUBNET_WORKERS, requested))
+
+
 def _parse_custom_headers(raw_headers: Optional[List[str]]) -> Dict[str, str]:
     """
     Parse a list of ``"Name: Value"`` header strings into a dict.
@@ -1305,7 +1325,9 @@ def run_scan(args: argparse.Namespace) -> int:
                 )
                 if subnet_hosts:
                     inst.subnet_hosts = subnet_hosts  # type: ignore[attr-defined]
-                    inst.subnet_workers = max(1, int(getattr(args, "subnet_workers", 100)))  # type: ignore[attr-defined]
+                    inst.subnet_workers = _clamp_subnet_workers(  # type: ignore[attr-defined]
+                        int(getattr(args, "subnet_workers", 100))
+                    )
                 return inst
             return cls(requester)
 
