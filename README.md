@@ -30,7 +30,8 @@ between what runs today and what is planned — see
 | REST API mode, CI/CD exit codes, webhook notifications | ✅ Shipped |
 | Host-scoped TCP port scan + explicit CIDR subnet sweep | ✅ Shipped (opt-in) |
 | Form-login authentication + mid-scan session recovery | ✅ Shipped (scaffold) |
-| **Tool orchestration** (nmap / nuclei / httpx / sqlmap adapters) | 🚧 Planned — Phase A/B |
+| **Tool orchestration** — framework + nuclei / nmap / httpx / ffuf adapters (`--tools`) | ✅ Shipped (opt-in) |
+| sqlmap / interactsh adapters (Phase C) | 🚧 Planned |
 | **JavaScript / SPA rendering** (`--dynamic` Playwright crawl) | 🚧 Planned — currently a stub |
 | **Out-of-band (OAST)** testing for blind vulns | 🚧 Planned (via interactsh) |
 | **API / OpenAPI import + JSON-body fuzzing** | 🚧 Planned |
@@ -81,6 +82,20 @@ vortex -u https://app.local --port-scan
 vortex -u https://app.local --subnet 192.168.1.0/24 --ports 22,80,443,3306
 ```
 
+Orchestrate external tools (opt-in; each is optional and auto-detected):
+
+```bash
+vortex --list-tools                               # adapters + install state
+vortex -u https://app.local --tools nuclei        # add nuclei's template checks
+vortex -u https://app.local --tools nmap,httpx    # recon: ports + live HTTP
+vortex -u https://app.local --tools ffuf --ffuf-wordlist big.txt  # content discovery
+vortex -u https://app.local --tools all --tool-timeout 300
+```
+
+Tool findings are folded into the same report, dedup, filters and CI exit code
+as the built-in modules. A missing tool never fails the scan: nmap falls back to
+the built-in TCP port scan; the others are skipped with a clear note.
+
 ---
 
 ## Architecture
@@ -97,12 +112,13 @@ vortex -u https://app.local --subnet 192.168.1.0/24 --ports 22,80,443,3306
                                     │  shared Finding model + session
                                     ▼
    ┌───────────────────────────────────────────────────────────┐
-   │              ORCHESTRATION LAYER (planned, Phase A/B)       │
+   │                ORCHESTRATION LAYER (--tools)                │
    │   ToolAdapter registry — each wraps an external specialist, │
-   │   runs it as a subprocess, parses its JSON, and maps the    │
-   │   results into VortexDAST Findings:                         │
+   │   runs it as a subprocess, parses its JSON/XML, and maps    │
+   │   the results into VortexDAST Findings:                     │
    │                                                             │
-   │     nmap ─ httpx ─ nuclei ─ sqlmap ─ interactsh ─ …         │
+   │     shipped:  nmap ─ httpx ─ nuclei ─ ffuf                  │
+   │     planned:  sqlmap ─ interactsh ─ nikto ─ …               │
    │   (detect-if-installed; built-in fallback when absent)      │
    └───────────────────────────────────────────────────────────┘
 ```
@@ -110,9 +126,12 @@ vortex -u https://app.local --subnet 192.168.1.0/24 --ports 22,80,443,3306
 - **Core** is the web-app scanner: a concurrent crawler, auto-discovered
   scanner modules (`modules/`), a shared thread-safe `Requester`, and a
   reporter. This is VortexDAST's own depth and is fully implemented.
-- **Orchestration layer** (roadmap) adds `ToolAdapter`s that shell out to
-  external tools and translate their output into the same `Finding` objects, so
-  one scan and one report span network recon through web-app exploitation. See
+- **Orchestration layer** (`core/orchestrator.py` + `adapters/`) runs
+  `ToolAdapter`s that shell out to external tools — always as an argv list with
+  `shell=False` and a hard timeout — and translate their output into the same
+  `Finding` objects, so one scan and one report span network recon through
+  web-app testing. Adapters are auto-discovered: drop a file in `adapters/`,
+  subclass `ToolAdapter`, set `name` + `binary`. See
   [`IMPROVEMENTS.md`](IMPROVEMENTS.md).
 
 ---
@@ -120,11 +139,13 @@ vortex -u https://app.local --subnet 192.168.1.0/24 --ports 22,80,443,3306
 ## CLI reference (today)
 
 ```text
-usage: vortexdast [-h] [--list-modules] [--list-themes] [--theme NAME]
-                  [--no-color] [--target URL] [--max-depth N]
+usage: vortexdast [-h] [--list-modules] [--list-tools] [--list-themes]
+                  [--theme NAME] [--no-color] [--target URL] [--max-depth N]
                   [--modules MODULES] [--recon-only]
                   [--port-scan] [--ports LIST] [--port-scan-timeout SECS]
                   [--subnet CIDR] [--max-subnet-hosts N] [--subnet-workers N]
+                  [--tools LIST] [--no-tools] [--tool-timeout SECS]
+                  [--ffuf-wordlist FILE]
                   [--rate-limit RPS] [--threads N] [--concurrency N]
                   [--timeout SECS] [--max-endpoints N] [--insecure]
                   [--dynamic] [--config PATH] [--proxy URL] [--cookie STRING]
@@ -146,6 +167,10 @@ Key flag groups (run `vortex -h` for the full list):
   recovery)
 - **Network recon (opt-in):** `--port-scan`, `--ports`, `--subnet`,
   `--max-subnet-hosts`, `--subnet-workers`
+- **External tools (opt-in):** `--tools` (`all` or a comma list, e.g.
+  `nuclei,nmap,httpx,ffuf`), `--no-tools` (force built-ins only), `--tool-timeout`
+  (hard per-tool cap, default 600 s), `--ffuf-wordlist`, `--list-tools`. Tools
+  that send HTTP (ffuf) honour `--rate-limit`, `--threads`, `--cookie` and `-H`
 - **Throughput:** `--rate-limit`, `--threads/--concurrency`, `--timeout`,
   `--proxy`, `--insecure`
 - **Output / filtering:** `--output/-o` (`.json/.sarif/.md/.html`),

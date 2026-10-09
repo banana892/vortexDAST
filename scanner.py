@@ -102,6 +102,12 @@ from core.theme import (
     get_theme,
 )
 from core import ui
+from core.orchestrator import (
+    ScanContext,
+    available_tools,
+    get_adapter,
+    list_tools,
+)
 from modules.base import CONFIDENCE_ORDER, BaseScannerModule, Finding
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -335,6 +341,65 @@ def _print_module_table(
     con.print()
 
 
+def _print_tool_table(
+    console: Optional[Console] = None,
+    theme: Optional[VortexTheme] = None,
+) -> None:
+    """
+    Pretty-print every external-tool adapter as a themed Rich table.
+
+    Columns: **ID** (the ``--tools`` name), **Binary** (the executable looked
+    up on ``PATH``), **Installed** (✓/✗ for this machine) and **Description**.
+    Mirrors :func:`_print_module_table` for the orchestration layer.
+    """
+    th = theme or get_theme()
+    con = console or build_console(th)
+
+    table = Table(
+        title=Text(
+            f"VortexDAST {th.glyphs.dash} External-Tool Adapters",
+            style=th.style("vortex.title"),
+        ),
+        title_justify="left",
+        show_header=True,
+        box=th.table_box,
+        header_style=th.style("vortex.header"),
+        border_style=th.style("vortex.border"),
+        show_lines=True,
+        padding=(0, 1),
+    )
+    table.add_column("ID", no_wrap=True, min_width=10, style=th.style("vortex.module"))
+    table.add_column("Binary", no_wrap=True, min_width=10, style=th.style("vortex.muted"))
+    table.add_column("Installed", no_wrap=True, justify="center")
+    table.add_column("Description", overflow="fold")
+
+    rows = list_tools()
+    installed_count = 0
+    for row in rows:
+        installed = bool(row["installed"])
+        installed_count += int(installed)
+        mark = Text(
+            th.glyphs.ok if installed else th.glyphs.error,
+            style=th.style("vortex.success" if installed else "vortex.muted"),
+        )
+        table.add_row(row["name"], row["binary"], mark, row["description"])
+
+    con.print()
+    con.print(table)
+
+    footer = Text("  ")
+    footer.append(str(len(rows)), style=th.style("vortex.value"))
+    footer.append(" adapter(s), ", style=th.style("vortex.muted"))
+    footer.append(str(installed_count), style=th.style("vortex.value"))
+    footer.append(" installed. Select with ", style=th.style("vortex.muted"))
+    footer.append("--tools nuclei,nmap", style=th.style("vortex.accent"))
+    footer.append(" or ", style=th.style("vortex.muted"))
+    footer.append("--tools all", style=th.style("vortex.accent"))
+    footer.append(".", style=th.style("vortex.muted"))
+    con.print(footer)
+    con.print()
+
+
 def _resolve_theme(
     args: argparse.Namespace,
     config: Optional[Dict[str, Any]] = None,
@@ -447,6 +512,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Print a Rich table of all registered scanner modules with their "
             "IDs and descriptions, then exit with code 0."
+        ),
+    )
+
+    parser.add_argument(
+        "--list-tools",
+        action="store_true",
+        default=False,
+        help=(
+            "Print a table of all external-tool adapters (nuclei, nmap, httpx, "
+            "…) and whether each binary is installed, then exit with code 0."
         ),
     )
 
@@ -575,6 +650,49 @@ def _build_parser() -> argparse.ArgumentParser:
             "timeouts overlap."
         ),
     )
+    # ── External-tool orchestration ──────────────────────────────────────────
+    parser.add_argument(
+        "--tools",
+        default=None,
+        metavar="LIST",
+        help=(
+            "Comma-separated external-tool adapters to run after the built-in "
+            "modules, or 'all' for every registered adapter (e.g. "
+            "'nuclei,nmap,httpx'). Each tool is optional: a missing binary "
+            "falls back to a built-in equivalent or is skipped cleanly. Run "
+            "--list-tools to see adapters and install state. Default: none."
+        ),
+    )
+    parser.add_argument(
+        "--no-tools",
+        action="store_true",
+        default=False,
+        help=(
+            "Explicitly run no external-tool adapters, overriding --tools (and "
+            "any future config default). Useful to force a built-ins-only scan."
+        ),
+    )
+    parser.add_argument(
+        "--ffuf-wordlist",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Wordlist for the ffuf adapter (--tools ffuf). Default: VortexDAST's "
+            "curated sensitive-path list (payloads/common_paths.json)."
+        ),
+    )
+    parser.add_argument(
+        "--tool-timeout",
+        type=float,
+        default=600.0,
+        metavar="SECS",
+        help=(
+            "Hard per-adapter subprocess timeout for --tools, in seconds "
+            "(default: 600). Caps each adapter's own default; a tool that "
+            "overruns is killed and the scan continues."
+        ),
+    )
+
     parser.add_argument(
         "--rate-limit",
         type=float,
@@ -920,6 +1038,56 @@ def _resolve_modules(modules_arg: str) -> List[str]:
     return requested
 
 
+def _resolve_tools(tools_arg: Optional[str]) -> List[str]:
+    """
+    Parse the ``--tools`` CLI argument into a validated list of adapter names.
+
+    Mirrors :func:`_resolve_modules` for the orchestration layer.
+
+    Parameters
+    ----------
+    tools_arg : str | None
+        The raw ``--tools`` value (e.g. ``"all"``, ``"nuclei,nmap"``), or
+        ``None`` / empty when no external tools were requested.
+
+    Returns
+    -------
+    list[str]
+        Ordered, validated adapter names present in the adapter registry.
+        Empty when ``tools_arg`` is empty.
+
+    Raises
+    ------
+    SystemExit
+        If an unknown adapter name is provided.
+    """
+    if not tools_arg or not tools_arg.strip():
+        return []
+
+    known = available_tools()
+    if tools_arg.strip().lower() == "all":
+        return known
+
+    requested = [t.strip() for t in tools_arg.split(",") if t.strip()]
+    unknown = [t for t in requested if t not in known]
+    if unknown:
+        print(
+            f"[ERROR] Unknown tool adapter(s): {unknown}. "
+            f"Available: {known}. Run --list-tools for details.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # De-duplicate while preserving first-seen order.
+    seen: set = set()
+    ordered: List[str] = []
+    for name in requested:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
 def _parse_port_list(raw: Optional[str]) -> Optional[List[int]]:
     """
     Parse a ``--ports`` value into a sorted, de-duplicated list of ints.
@@ -1169,22 +1337,32 @@ def run_scan(args: argparse.Namespace) -> int:
     if port_scan_enabled and "port_scan" not in selected_modules:
         selected_modules.append("port_scan")
 
-    ui.banner(console, theme, __version__)
-    ui.scan_header(
-        console,
-        theme,
-        args.target,
-        {
-            "Modules": f"{len(selected_modules)} selected {theme.glyphs.dash} "
-                       + ", ".join(selected_modules),
-            "Depth": max_depth,
-            "Threads": threads,
-            "Rate": f"{rate_limit_rps:g} req/s" if rate_limit_rps else "unlimited",
-            "Timeout": f"{timeout}s",
-            "SSL verify": "on" if verify_ssl else "off (--insecure)",
-            "Endpoint cap": max_endpoints if max_endpoints else "none",
-        },
+    # External-tool adapters (opt-in). --no-tools wins over --tools so a scan
+    # can be forced built-ins-only.
+    selected_tools: List[str] = (
+        [] if getattr(args, "no_tools", False)
+        else _resolve_tools(getattr(args, "tools", None))
     )
+    ffuf_wordlist = getattr(args, "ffuf_wordlist", None)
+    if ffuf_wordlist and not os.path.isfile(ffuf_wordlist):
+        logger.error("--ffuf-wordlist not found: %s", ffuf_wordlist)
+        return 1
+
+    header_rows: Dict[str, Any] = {
+        "Modules": f"{len(selected_modules)} selected {theme.glyphs.dash} "
+                   + ", ".join(selected_modules),
+        "Depth": max_depth,
+        "Threads": threads,
+        "Rate": f"{rate_limit_rps:g} req/s" if rate_limit_rps else "unlimited",
+        "Timeout": f"{timeout}s",
+        "SSL verify": "on" if verify_ssl else "off (--insecure)",
+        "Endpoint cap": max_endpoints if max_endpoints else "none",
+    }
+    if selected_tools:
+        header_rows["Tools"] = ", ".join(selected_tools)
+
+    ui.banner(console, theme, __version__)
+    ui.scan_header(console, theme, args.target, header_rows)
 
     # ── Initialise shared Requester ────────────────────────────────────────
     # Resolve auth CLI args.
@@ -1501,6 +1679,71 @@ def run_scan(args: argparse.Namespace) -> int:
                 )
                 all_findings.extend(module_findings)
 
+        # ── Phase 3: External-tool orchestration (optional) ────────────────
+        # Drive best-of-breed external tools (nuclei, nmap, httpx, …) and fold
+        # their output into the same Finding list. Each adapter self-detects:
+        # a missing binary falls back to a built-in equivalent or skips.
+        if selected_tools:
+            console.print()
+            ui.phase(
+                console, theme, 3, "External tools",
+                f"{len(selected_tools)} adapter(s) {theme.glyphs.dash} "
+                + ", ".join(selected_tools),
+            )
+
+            ctx = ScanContext(
+                target=args.target,
+                scope_hosts=[
+                    h for h in [urlsplit(args.target).hostname] if h
+                ],
+                tool_timeout=float(getattr(args, "tool_timeout", 600.0)),
+            )
+            # Hand the shared requester to adapters whose fallback reuses a
+            # built-in module (e.g. nmap → port_scan), plus the scan's own
+            # throughput and auth settings so tools that send HTTP (ffuf)
+            # honour --rate-limit / --threads / --cookie / -H like the modules.
+            ctx.extra["requester"] = requester
+            ctx.extra["rate_limit_rps"] = rate_limit_rps
+            ctx.extra["threads"] = threads
+            ctx.extra["request_timeout"] = timeout
+            ctx.extra["headers"] = auth_headers
+            ctx.extra["cookie"] = args.cookie
+            ctx.extra["ffuf_wordlist"] = getattr(args, "ffuf_wordlist", None)
+            # Data passing: seed any open ports the built-in port scan already
+            # found so a later tool could consume them.
+            for finding in all_findings:
+                if finding.extra.get("module") == "port_scan":
+                    _host = finding.extra.get("host")
+                    _port = finding.extra.get("port")
+                    if _host and isinstance(_port, int):
+                        ctx.open_ports.setdefault(_host, []).append(_port)
+
+            for tool_name in selected_tools:
+                adapter = get_adapter(tool_name)
+                if adapter is None:  # pragma: no cover — guarded by _resolve_tools
+                    continue
+                installed = adapter.is_available()
+                try:
+                    tool_findings = adapter.run(args.target, ctx)
+                except Exception as exc:  # noqa: BLE001 — one tool must not sink the scan
+                    logger.error("Tool '%s' raised: %s", tool_name, exc, exc_info=args.verbose)
+                    tool_findings = []
+
+                # Chain live HTTP base URLs forward for later adapters.
+                for finding in tool_findings:
+                    svc = finding.extra.get("http_service_url")
+                    if svc and svc not in ctx.http_services:
+                        ctx.http_services.append(svc)
+
+                note = "" if installed else "(binary not installed — fallback/skip)"
+                ui.status(
+                    console, theme,
+                    "ok" if tool_findings else "info",
+                    f"{tool_name:<20}{len(tool_findings)} finding(s)",
+                    note,
+                )
+                all_findings.extend(tool_findings)
+
         # ── Phase 4: Statistical anomaly detection ─────────────────────────────
         if not args.disable_anomaly_detection and endpoints:
             try:
@@ -1531,6 +1774,7 @@ def run_scan(args: argparse.Namespace) -> int:
         "endpoints_crawled": len(crawl_result.endpoints) if crawl_result is not None else 0,
         "endpoints_scanned": len(endpoints),
         "modules_run": ", ".join(selected_modules),
+        "tools_run": ", ".join(selected_tools) if selected_tools else "none",
         "max_depth": max_depth,
         "threads": threads,
         "timeout_s": timeout,
@@ -1670,10 +1914,16 @@ def main() -> int:
         _print_module_table(build_console(theme, no_color=no_color), theme)
         return 0
 
+    # ── --list-tools: print adapter table and exit immediately ─────────────
+    if args.list_tools:
+        _print_tool_table(build_console(theme, no_color=no_color), theme)
+        return 0
+
     # ── Validate that --target is provided for actual scans ───────────────
     if not args.target:
         parser.error(
-            "argument --target/-u is required when not using --list-modules / --list-themes."
+            "argument --target/-u is required when not using "
+            "--list-modules / --list-tools / --list-themes."
         )
 
     return run_scan(args)

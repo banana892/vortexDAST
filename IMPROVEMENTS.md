@@ -128,20 +128,32 @@ early adapters there.
 
 ## 4. Phased roadmap
 
-### Phase A — Orchestration foundation
+### Phase A — Orchestration foundation — ✅ shipped
 - `core/orchestrator.py`: `ToolAdapter` base, adapter registry (auto-discovery,
   like the module registry), shared scan context, argv-safe subprocess runner
   with timeout, `is_available()` detection.
 - Finding-mapping helpers + a generic JSONL parser.
 - CLI: `--tools nuclei,nmap,...` / `--tools all` / `--no-tools`;
-  `--list-tools` showing which are installed.
+  `--list-tools` showing which are installed; `--tool-timeout` hard cap.
+  Tools run as **Phase 3** of `run_scan`, after the built-in modules; their
+  findings share the report, dedup, filters and CI exit code.
 - Tests with fake tool binaries (fixture scripts emitting canned JSON) so
-  adapter logic is tested without the real tool installed.
+  adapter logic is tested without the real tool installed, plus end-to-end
+  `run_scan` tests against a local HTTP server.
 
-### Phase B — Tier-1 adapters (highest value, cleanest JSON)
+### Phase B — Tier-1 adapters (highest value, cleanest JSON) — ✅ shipped
 1. **nuclei** — biggest leverage; thousands of checks for little code.
-2. **nmap** — makes the recon half real (built-in port scanner becomes fallback).
-3. **httpx** — the glue connecting nmap's open ports to the web scan.
+2. **nmap** — makes the recon half real (built-in port scanner becomes
+   fallback). Parses `-oX` XML; risky services (DBs, remote access, …) are
+   MEDIUM, others informational.
+3. **httpx** — the glue connecting nmap's open ports to the web scan. Live
+   base URLs are chained forward via `ScanContext.http_services`.
+
+**Known follow-ups:** adapters currently each target the seed URL. The
+data-chaining plumbing exists (`ScanContext.open_ports` is seeded from
+`port_scan`, `http_services` from httpx) but no adapter *consumes* it yet —
+e.g. httpx probing every nmap-discovered port, nuclei templating every live
+httpx URL. That consumption is the Phase E "full data-chaining" item.
 
 ### Phase C — Tier-2 adapters (depth)
 4. **sqlmap** (REST API) — turns "possible SQLi" leads into confirmed findings.
@@ -158,7 +170,9 @@ own quality:
   OAuth2/OIDC, login-page CSRF-token harvesting, multi-step/MFA, role matrix.
 
 ### Phase E — Tier-3 adapters + chaining polish
-- ffuf, nikto, subfinder, testssl.sh adapters.
+- ~~ffuf~~ ✅ shipped early (curated-catalogue default wordlist, `-ac`
+  soft-404 calibration, honours rate limit/threads/auth); nikto, subfinder,
+  testssl.sh adapters remain.
 - Full data-chaining across the pipeline and a combined recon→exploit report
   view.
 
@@ -215,6 +229,9 @@ Ordered by impact; several are now *resolved by the plan above*.
 - Host-scoped TCP port scan + explicit CIDR subnet sweep (opt-in, capped,
   parallelised).
 - Form-login authentication scaffold + mid-scan session recovery.
+- Tool orchestration (Phases A + B): `ToolAdapter` framework, `--tools` /
+  `--no-tools` / `--tool-timeout` / `--list-tools`, and nuclei, nmap (with
+  built-in port-scan fallback), httpx and ffuf adapters.
 
 ---
 
@@ -232,3 +249,7 @@ Ordered by impact; several are now *resolved by the plan above*.
 - 2026-10-09 — Rewritten as the orchestrator (Option B) implementation plan;
   added VAPT-readiness gaps; shipped host-scoped port/subnet scanning and the
   authenticated-scanning scaffold.
+- 2026-10-09 — Phases A + B shipped: orchestration wired into the CLI
+  (`--tools`, `--no-tools`, `--tool-timeout`, `--list-tools`); nuclei, nmap and
+  httpx adapters; ffuf adapter pulled forward from Phase E; `adapters/` now
+  packaged and type-checked. Next: Phase C (sqlmap REST API, interactsh OAST).

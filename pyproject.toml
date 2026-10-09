@@ -95,7 +95,7 @@ py-modules = ["scanner"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "modules*", "payloads*"]
+include = ["core*", "modules*", "adapters*", "payloads*"]
 exclude = ["tests*", "*.egg-info", "__pycache__"]
 
 # ── Include non-Python data files ─────────────────────────────────────────────
@@ -136,7 +136,7 @@ skip_covered = false
 # ─────────────────────────────────────────────────────────────────────────────
 [tool.mypy]
 python_version = "3.9"
-files = ["core", "modules", "scanner.py"]
+files = ["core", "modules", "adapters", "scanner.py"]
 warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
