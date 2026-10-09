@@ -1,0 +1,39 @@
+{
+  "meta": {
+    "description": "Curated list of common TCP ports for host service discovery. Used by modules/port_scan.py. 'risk' tags services whose exposure to an untrusted network is usually a finding in its own right (admin consoles, databases, remote-access, legacy cleartext protocols).",
+    "scope_note": "The port scanner only targets the single host resolved from the scan target URL. It never expands to CIDR ranges or additional hosts.",
+    "safe": true
+  },
+  "ports": [
+    {"port": 21,    "service": "ftp",          "risk": "medium", "note": "Legacy cleartext file transfer."},
+    {"port": 22,    "service": "ssh",           "risk": "low",    "note": "Remote shell; expected on many hosts."},
+    {"port": 23,    "service": "telnet",        "risk": "high",   "note": "Cleartext remote shell; should never be exposed."},
+    {"port": 25,    "service": "smtp",          "risk": "low",    "note": "Mail transfer."},
+    {"port": 53,    "service": "dns",           "risk": "low",    "note": "Name resolution."},
+    {"port": 80,    "service": "http",          "risk": "info",   "note": "Web server."},
+    {"port": 110,   "service": "pop3",          "risk": "medium", "note": "Cleartext mail retrieval."},
+    {"port": 135,   "service": "msrpc",         "risk": "medium", "note": "Windows RPC endpoint mapper."},
+    {"port": 139,   "service": "netbios-ssn",   "risk": "high",   "note": "Legacy SMB/NetBIOS."},
+    {"port": 143,   "service": "imap",          "risk": "medium", "note": "Cleartext mail retrieval."},
+    {"port": 443,   "service": "https",         "risk": "info",   "note": "TLS web server."},
+    {"port": 445,   "service": "smb",           "risk": "high",   "note": "File sharing; frequent exploitation target when exposed."},
+    {"port": 1433,  "service": "mssql",         "risk": "high",   "note": "Microsoft SQL Server; databases should not face untrusted networks."},
+    {"port": 1521,  "service": "oracle",        "risk": "high",   "note": "Oracle DB listener."},
+    {"port": 2375,  "service": "docker-api",    "risk": "high",   "note": "Unauthenticated Docker daemon API grants host control."},
+    {"port": 3000,  "service": "http-alt/node", "risk": "info",   "note": "Common dev / Node / Grafana port."},
+    {"port": 3306,  "service": "mysql",         "risk": "high",   "note": "MySQL/MariaDB database."},
+    {"port": 3389,  "service": "rdp",           "risk": "high",   "note": "Remote Desktop; common brute-force/exploit target."},
+    {"port": 5432,  "service": "postgresql",    "risk": "high",   "note": "PostgreSQL database."},
+    {"port": 5601,  "service": "kibana",        "risk": "medium", "note": "Kibana console."},
+    {"port": 5900,  "service": "vnc",           "risk": "high",   "note": "Remote framebuffer; often weakly authenticated."},
+    {"port": 6379,  "service": "redis",         "risk": "high",   "note": "Redis; unauthenticated by default."},
+    {"port": 8000,  "service": "http-alt",      "risk": "info",   "note": "Common alternate web port."},
+    {"port": 8080,  "service": "http-proxy",    "risk": "info",   "note": "Common alternate web / proxy port."},
+    {"port": 8443,  "service": "https-alt",     "risk": "info",   "note": "Common alternate TLS web port."},
+    {"port": 8888,  "service": "http-alt",      "risk": "info",   "note": "Common alternate web / notebook port."},
+    {"port": 9200,  "service": "elasticsearch", "risk": "high",   "note": "Elasticsearch; unauthenticated by default."},
+    {"port": 9300,  "service": "elasticsearch", "risk": "medium", "note": "Elasticsearch transport."},
+    {"port": 11211, "service": "memcached",     "risk": "high",   "note": "Memcached; unauthenticated, UDP-amplification source."},
+    {"port": 27017, "service": "mongodb",       "risk": "high",   "note": "MongoDB; historically exposed without auth."}
+  ]
+}

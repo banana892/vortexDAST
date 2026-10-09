@@ -1,6 +1,6 @@
 # VortexDAST — Improvement Roadmap
 
-**Last Updated:** 2026-10-07
+**Last Updated:** 2026-10-08
 
 ---
 
@@ -304,6 +304,15 @@ VortexDAST is a lightweight, modular DAST framework with solid architecture and 
 - [x] Slack/webhook notifications on findings
 - **Files:** `core/notify.py`, `core/issue_tracker.py`, `scanner.py`
 - **Effort:** 3–4 days
+
+#### 3.3.5 Themed Terminal UI
+**Status:** ✅ Done (2026-10-08) — `core/theme.py` + `core/ui.py`. The CLI renders only semantic style tokens (`vortex.accent`, `sev.critical`, …), so a single `--theme` recolours the scan header, progress bars, module table and findings dashboard. 9 themes: `minimal` (default — near-monochrome, no wordmark, thin borders) and `mono` (no colour, ASCII) plus `vortex`, `neon`, `matrix`, `dracula`, `nord`, `solarized`, `gruvbox`. Selection follows `--theme` > `VORTEX_THEME` > `config.yaml ui.theme` > `minimal`; `--no-color` / `VORTEX_NO_COLOR` strips colour but keeps layout. Non-verbose runs now hold back `core.*` per-request logging so the phase output stays readable. 108 unit tests.
+
+- [x] Named colour themes, selectable per run and per config
+- [x] Minimal, quiet default; richer palettes opt-in
+- [x] `--list-themes` palette preview; severity distribution bar in the summary
+- **Files:** `core/theme.py`, `core/ui.py`, `core/reporter.py`, `core/profiles.py`, `scanner.py`
+- **Effort:** 1–2 days
 
 **Total Effort:** 8–10 days
 

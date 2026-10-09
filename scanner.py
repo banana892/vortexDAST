@@ -63,6 +63,14 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from rich.table import Table
+from rich.text import Text
+
+try:  # Installed distribution metadata is the source of truth for the version.
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("vortexdast")
+except Exception:  # pragma: no cover — running from a source checkout
+    __version__ = "1.0.0"
 
 # Project-root path manipulation so the script runs from the repo root.
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -84,6 +92,15 @@ from core.notify import WEBHOOK_FORMATS, build_payload, send_webhook
 from core.filters import SEVERITY_ORDER, FilterConfigError, FindingFilter, load_suppression_rules
 from core.reporter import Reporter
 from core.requester import Requester
+from core.theme import (
+    DEFAULT_THEME_NAME,
+    THEME_NAMES,
+    ThemeError,
+    VortexTheme,
+    build_console,
+    get_theme,
+)
+from core import ui
 from modules.base import CONFIDENCE_ORDER, BaseScannerModule, Finding
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -145,6 +162,11 @@ def _discover_modules() -> Dict[str, Type[BaseScannerModule]]:
 #: Built once at import-time via dynamic subclass introspection.
 MODULE_REGISTRY: Dict[str, Type[BaseScannerModule]] = _discover_modules()
 
+#: Modules that are registered and runnable, but excluded from "--modules all".
+#: They perform activity distinct enough (e.g. raw network port scanning) that
+#: the operator must opt in explicitly.
+_OPT_IN_MODULES: frozenset = frozenset({"port_scan"})
+
 _DEFAULT_CONFIG_PATH = os.path.join(_ROOT, "config.yaml")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,8 +174,13 @@ _DEFAULT_CONFIG_PATH = os.path.join(_ROOT, "config.yaml")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _configure_logging(verbose: bool) -> None:
-    """Configure structured logging with RichHandler for prettier output."""
+def _configure_logging(verbose: bool, console: Optional[Console] = None) -> None:
+    """
+    Configure structured logging with RichHandler for prettier output.
+
+    Passing the themed console makes log records share the scan's palette, so
+    style tokens such as ``[vortex.accent]`` resolve inside log messages.
+    """
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -161,12 +188,20 @@ def _configure_logging(verbose: bool) -> None:
         datefmt="[%X]",
         handlers=[
             RichHandler(
+                console=console,
                 rich_tracebacks=True,
                 markup=True,
                 show_path=False,
+                show_time=verbose,
+                omit_repeated_times=False,
             )
         ],
+        force=True,
     )
+    # Keep a default run readable: each phase prints its own status line, so
+    # the per-request chatter from the core.* loggers is held back to
+    # --verbose. Warnings and errors always come through.
+    logging.getLogger("core").setLevel(logging.DEBUG if verbose else logging.WARNING)
 
 
 logger = logging.getLogger("vortexdast")
@@ -240,68 +275,129 @@ def _load_config(path: str) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _print_module_table(console: Optional[Console] = None) -> None:
+def _print_module_table(
+    console: Optional[Console] = None,
+    theme: Optional[VortexTheme] = None,
+) -> None:
     """
-    Pretty-print all registered scanner modules as a Rich table.
+    Pretty-print all registered scanner modules as a themed Rich table.
 
-    Displays three columns: **ID** (the CLI ``--modules`` name), **Class**
-    (the Python class name), and **Description** (human-readable summary).
+    Columns: **ID** (the ``--modules`` name), **Class** (Python class name)
+    and **Description**.
 
     Parameters
     ----------
     console : rich.console.Console | None
-        Rich console to render into.  A default ``Console()`` is used when
-        ``None`` is passed.
+        Rich console to render into. A themed console is created when omitted.
+    theme : core.theme.VortexTheme | None
+        Palette to render with. Defaults to the built-in default theme.
     """
-    con = console or Console()
+    th = theme or get_theme()
+    con = console or build_console(th)
 
     table = Table(
-        title="\n[bold magenta]VortexDAST — Registered Scanner Modules[/bold magenta]",
+        title=Text(
+            f"VortexDAST {th.glyphs.dash} Registered Scanner Modules",
+            style=th.style("vortex.title"),
+        ),
         title_justify="left",
         show_header=True,
-        header_style="bold cyan",
-        border_style="bright_black",
+        box=th.table_box,
+        header_style=th.style("vortex.header"),
+        border_style=th.style("vortex.border"),
+        # Descriptions fold over several lines, so separate the rows.
         show_lines=True,
-        expand=False,
         padding=(0, 1),
     )
-    table.add_column("ID", style="bold yellow", no_wrap=True, min_width=16)
-    table.add_column("Class", style="dim white", no_wrap=True, min_width=22)
-    table.add_column("Description", style="white", overflow="fold")
+    table.add_column("ID", no_wrap=True, min_width=16, style=th.style("vortex.module"))
+    table.add_column("Class", no_wrap=True, min_width=22, style=th.style("vortex.muted"))
+    table.add_column("Description", overflow="fold")
 
     for mod_id, cls in sorted(MODULE_REGISTRY.items()):
         table.add_row(mod_id, cls.__name__, cls.description)
 
+    con.print()
     con.print(table)
-    con.print(
-        f"\n  [dim]Total: [bold]{len(MODULE_REGISTRY)}[/bold] module(s) registered.[/dim]\n"
-        "  Use [bold yellow]-m MODULE_ID[/bold yellow] or "
-        "[bold yellow]--modules all[/bold yellow] to select them.\n"
+
+    footer = Text("  ")
+    footer.append(str(len(MODULE_REGISTRY)), style=th.style("vortex.value"))
+    footer.append(" module(s) registered. Select with ", style=th.style("vortex.muted"))
+    footer.append("-m MODULE_ID", style=th.style("vortex.accent"))
+    footer.append(" or ", style=th.style("vortex.muted"))
+    footer.append("--modules all", style=th.style("vortex.accent"))
+    footer.append(".", style=th.style("vortex.muted"))
+    con.print(footer)
+    con.print()
+
+
+def _resolve_theme(
+    args: argparse.Namespace,
+    config: Optional[Dict[str, Any]] = None,
+) -> Tuple[VortexTheme, bool]:
+    """
+    Pick the active theme, honouring the project's usual precedence:
+
+        --theme flag  >  VORTEX_THEME env  >  config.yaml ui.theme  >  default
+
+    ``VORTEX_THEME`` reaches us through ``config["ui"]["theme"]`` because
+    :func:`~core.profiles.apply_env_overrides` has already layered it on.
+
+    Returns
+    -------
+    tuple[VortexTheme, bool]
+        The resolved theme and whether colour should be suppressed entirely.
+
+    Raises
+    ------
+    core.theme.ThemeError
+        If an unknown theme name was requested.
+    """
+    ui_cfg = (config or {}).get("ui", {}) or {}
+    # Before config.yaml is loaded (``--list-themes``, bootstrap logging) the
+    # env var has not been layered in yet, so read it directly.
+    env_theme = os.environ.get("VORTEX_THEME") if config is None else None
+    env_no_color = os.environ.get("VORTEX_NO_COLOR") if config is None else None
+
+    name = getattr(args, "theme", None) or env_theme or ui_cfg.get("theme") or DEFAULT_THEME_NAME
+    no_color = bool(
+        getattr(args, "no_color", False)
+        or (env_no_color or "").strip().lower() in ("1", "true", "yes", "on")
+        or ui_cfg.get("no_color", False)
     )
+    return get_theme(name), no_color
 
 
-def _make_fuzz_progress(console: Console) -> Progress:
+def _make_fuzz_progress(console: Console, theme: Optional[VortexTheme] = None) -> Progress:
     """
     Build a :class:`rich.progress.Progress` instance configured for the fuzz phase.
 
-    Columns: spinner | description text | bar | X/Y | ETA.
+    Columns: spinner | description text | bar | X/Y | ETA. The spinner and bar
+    colours come from ``theme``.
 
     Parameters
     ----------
     console : Console
         The shared Rich console to render into.
+    theme : core.theme.VortexTheme | None
+        Palette for the spinner and bar. Defaults to the default theme.
 
     Returns
     -------
     rich.progress.Progress
         Ready-to-use progress context (not yet started).
     """
+    th = theme or get_theme()
     return Progress(
-        SpinnerColumn(spinner_name="dots2"),
+        SpinnerColumn(spinner_name=th.spinner, style=th.style("vortex.accent")),
         TextColumn("{task.description}", justify="left"),
-        BarColumn(bar_width=36),
+        BarColumn(
+            bar_width=32,
+            style=th.style("vortex.border"),
+            complete_style=th.style("vortex.accent"),
+            finished_style=th.style("vortex.success"),
+        ),
         TaskProgressColumn(),
-        TextColumn("[dim]ETA[/dim]"),
+        TextColumn("[vortex.muted]ETA[/vortex.muted]"),
         TimeRemainingColumn(),
         console=console,
         transient=False,
@@ -332,6 +428,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "  vortex -u http://target.com --modules all --rate-limit 20 --concurrency 20\n"
             "  vortex -u http://target.com --max-endpoints 10 --timeout 5 --rate-limit 10\n"
             "  vortexdast -u http://target.com --dynamic --verbose\n"
+            "  vortex --list-themes\n"
+            "  vortex -u http://target.com --theme neon\n"
+            "  vortex -u http://target.com --theme mono --no-color -o scan.json\n"
         ),
     )
 
@@ -343,6 +442,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Print a Rich table of all registered scanner modules with their "
             "IDs and descriptions, then exit with code 0."
+        ),
+    )
+
+    parser.add_argument(
+        "--list-themes",
+        action="store_true",
+        default=False,
+        help=(
+            "Print all available colour themes with a live palette preview, "
+            "then exit with code 0."
+        ),
+    )
+
+    # ── Appearance ───────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--theme",
+        choices=THEME_NAMES,
+        default=None,
+        metavar="NAME",
+        help=(
+            "Terminal colour theme: " + ", ".join(THEME_NAMES) + ". "
+            f"Default: {DEFAULT_THEME_NAME} (near-monochrome). "
+            "Run --list-themes to preview them. Also settable via config.yaml "
+            "ui.theme or the VORTEX_THEME env var."
+        ),
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        default=False,
+        help=(
+            "Strip all colour from terminal output while keeping the layout. "
+            "Applies on top of --theme; useful for logs and dumb terminals."
         ),
     )
 
@@ -381,6 +513,31 @@ def _build_parser() -> argparse.ArgumentParser:
             "Run only reconnaissance modules (tech_detect, dir_fuzzer, param_fuzzer). "
             "Overrides --modules."
         ),
+    )
+    parser.add_argument(
+        "--port-scan",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable the host-scoped TCP connect port scan (opt-in; excluded from "
+            "--modules all). Scans only the target host — no CIDR/subnet expansion."
+        ),
+    )
+    parser.add_argument(
+        "--ports",
+        default=None,
+        metavar="LIST",
+        help=(
+            "Comma-separated ports and ranges to scan, e.g. '22,80,8000-8100'. "
+            "Implies --port-scan. Default: curated common-ports list."
+        ),
+    )
+    parser.add_argument(
+        "--port-scan-timeout",
+        type=float,
+        default=1.5,
+        metavar="SECS",
+        help="Per-port TCP connect timeout for --port-scan (default: 1.5).",
     )
     parser.add_argument(
         "--rate-limit",
@@ -665,7 +822,9 @@ def _resolve_modules(modules_arg: str) -> List[str]:
         If an unknown module name is provided.
     """
     if modules_arg.strip().lower() == "all":
-        return list(MODULE_REGISTRY.keys())
+        # port_scan is opt-in (noisy, legally distinct network activity) and is
+        # enabled explicitly via --port-scan / --ports, never by "all".
+        return [m for m in MODULE_REGISTRY.keys() if m not in _OPT_IN_MODULES]
 
     requested = [m.strip() for m in modules_arg.split(",") if m.strip()]
     unknown = [m for m in requested if m not in MODULE_REGISTRY]
@@ -678,6 +837,45 @@ def _resolve_modules(modules_arg: str) -> List[str]:
         sys.exit(1)
 
     return requested
+
+
+def _parse_port_list(raw: Optional[str]) -> Optional[List[int]]:
+    """
+    Parse a ``--ports`` value into a sorted, de-duplicated list of ints.
+
+    Accepts comma-separated single ports and ``lo-hi`` ranges, e.g.
+    ``"22,80,8000-8100"``. Returns ``None`` when ``raw`` is empty (meaning
+    "use the curated default list"). Exits with an error on malformed input or
+    out-of-range (1–65535) ports.
+    """
+    if not raw or not raw.strip():
+        return None
+
+    ports: set = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            if "-" in token:
+                lo_s, hi_s = token.split("-", 1)
+                lo, hi = int(lo_s), int(hi_s)
+                if lo > hi:
+                    lo, hi = hi, lo
+                rng = range(lo, hi + 1)
+            else:
+                p = int(token)
+                rng = range(p, p + 1)
+        except ValueError:
+            print(f"[ERROR] Invalid --ports token: {token!r}", file=sys.stderr)
+            sys.exit(1)
+        for p in rng:
+            if not (1 <= p <= 65535):
+                print(f"[ERROR] Port out of range (1-65535): {p}", file=sys.stderr)
+                sys.exit(1)
+            ports.add(p)
+
+    return sorted(ports)
 
 
 def _parse_custom_headers(raw_headers: Optional[List[str]]) -> Dict[str, str]:
@@ -739,8 +937,15 @@ def run_scan(args: argparse.Namespace) -> int:
         Exit code: 0 = success, 1 = scan error, 2 = findings detected
         (useful for CI/CD pipelines that treat vulnerabilities as build failures).
     """
-    console = Console()
-    _configure_logging(args.verbose)
+    # Bootstrap the console from --theme / VORTEX_THEME so even config-load
+    # warnings are themed; re-resolved below once config.yaml ui.theme is known.
+    try:
+        theme, no_color = _resolve_theme(args)
+    except ThemeError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+    console = build_console(theme, no_color=no_color)
+    _configure_logging(args.verbose, console)
 
     # Validate filters before scanning so a typo doesn't waste a full scan.
     try:
@@ -771,6 +976,17 @@ def run_scan(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         logger.error("Configuration error: %s", exc)
         return 1
+
+    # config.yaml ui.theme now has a say (under --theme and VORTEX_THEME).
+    try:
+        resolved_theme, resolved_no_color = _resolve_theme(args, config)
+    except ThemeError as exc:
+        logger.error("%s", exc)
+        return 1
+    if (resolved_theme.name, resolved_no_color) != (theme.name, no_color):
+        theme, no_color = resolved_theme, resolved_no_color
+        console = build_console(theme, no_color=no_color)
+        _configure_logging(args.verbose, console)
 
     req_cfg = config.get("requester", {})
     crawler_cfg = config.get("crawler", {})
@@ -809,12 +1025,27 @@ def run_scan(args: argparse.Namespace) -> int:
     else:
         selected_modules = _resolve_modules(args.modules)
 
-    logger.info("Target : [bold cyan]%s[/bold cyan]", args.target)
-    logger.info("Modules: %s", ", ".join(selected_modules))
-    logger.info(
-        "Depth: %d | Timeout: %ds | RPS: %.1f | Threads: %d | SSL verify: %s%s",
-        max_depth, timeout, rate_limit_rps, threads, verify_ssl,
-        f" | Endpoint cap: {max_endpoints}" if max_endpoints else "",
+    # --port-scan / --ports opt the host-scoped port scanner in (it is never
+    # part of "all"). --ports implies --port-scan.
+    port_scan_enabled = bool(getattr(args, "port_scan", False) or getattr(args, "ports", None))
+    if port_scan_enabled and "port_scan" not in selected_modules:
+        selected_modules.append("port_scan")
+
+    ui.banner(console, theme, __version__)
+    ui.scan_header(
+        console,
+        theme,
+        args.target,
+        {
+            "Modules": f"{len(selected_modules)} selected {theme.glyphs.dash} "
+                       + ", ".join(selected_modules),
+            "Depth": max_depth,
+            "Threads": threads,
+            "Rate": f"{rate_limit_rps:g} req/s" if rate_limit_rps else "unlimited",
+            "Timeout": f"{timeout}s",
+            "SSL verify": "on" if verify_ssl else "off (--insecure)",
+            "Endpoint cap": max_endpoints if max_endpoints else "none",
+        },
     )
 
     # ── Initialise shared Requester ────────────────────────────────────────
@@ -885,24 +1116,25 @@ def run_scan(args: argparse.Namespace) -> int:
             cached = crawl_cache.load_cache(_cache_path, _cache_key, ttl_seconds=_ttl)
             if cached is not None:
                 crawl_result = cached
-                console.print(
-                    f"  [bold green]✓[/bold green] Reusing cached crawl — "
-                    f"[bold]{len(cached.endpoints)}[/bold] endpoint(s) "
-                    f"[dim](--incremental)[/dim]"
+                ui.status(
+                    console, theme, "ok",
+                    f"Reusing cached crawl — {len(cached.endpoints)} endpoint(s)",
+                    "(--incremental)",
                 )
 
         if crawl_result is None:
             crawl_thread = threading.Thread(target=_do_crawl, daemon=True)
 
+            ui.phase(console, theme, 1, "Crawling", f"max depth {max_depth}")
+
             with Progress(
-                SpinnerColumn(spinner_name="bouncingBar"),
+                SpinnerColumn(spinner_name=theme.spinner, style=theme.style("vortex.accent")),
                 TextColumn("{task.description}"),
                 console=console,
                 transient=True,
             ) as crawl_progress:
                 crawl_task = crawl_progress.add_task(
-                    f"[bold cyan]Phase 1 — Crawling[/bold cyan]  "
-                    f"[dim]{args.target}[/dim]  [dim](depth ≤ {max_depth})[/dim]",
+                    f"  [vortex.muted]{args.target}[/vortex.muted]",
                     total=None,  # indeterminate – we don't know the URL count upfront
                 )
                 crawl_thread.start()
@@ -912,9 +1144,9 @@ def run_scan(args: argparse.Namespace) -> int:
                     crawl_progress.update(
                         crawl_task,
                         description=(
-                            f"[bold cyan]Phase 1 — Crawling[/bold cyan]  "
-                            f"[dim]{args.target}[/dim]  "
-                            f"[green]{discovered}[/green] URL(s) found…"
+                            f"  [vortex.muted]{args.target}[/vortex.muted]  "
+                            f"[vortex.value]{discovered}[/vortex.value]"
+                            f"[vortex.muted] URL(s) found…[/vortex.muted]"
                         ),
                     )
                     time.sleep(0.25)
@@ -931,11 +1163,11 @@ def run_scan(args: argparse.Namespace) -> int:
             # Persist the fresh crawl so a later --incremental run can reuse it.
             crawl_cache.save_cache(_cache_path, _cache_key, crawl_result)
 
-        console.print(
-            f"  [bold green]✓[/bold green] Crawl complete — "
-            f"[bold]{len(crawl_result.endpoints)}[/bold] endpoint(s), "
-            f"[bold]{crawl_result.total_forms}[/bold] form(s), "
-            f"[bold]{len(crawl_result.failed_urls)}[/bold] failed."
+        ui.status(
+            console, theme, "ok", "Crawl complete",
+            f"{len(crawl_result.endpoints)} endpoint(s) {theme.glyphs.bullet} "
+            f"{crawl_result.total_forms} form(s) {theme.glyphs.bullet} "
+            f"{len(crawl_result.failed_urls)} failed",
         )
 
         if not crawl_result.endpoints:
@@ -943,9 +1175,10 @@ def run_scan(args: argparse.Namespace) -> int:
 
         # ── Phase 2: Dynamic crawl (optional) ─────────────────────────────
         if args.dynamic:
-            logger.info(
-                "[yellow]Dynamic Playwright crawl requested — "
-                "not yet implemented in this phase.[/yellow]"
+            ui.status(
+                console, theme, "warn",
+                "Dynamic Playwright crawl requested",
+                "not yet implemented in this phase",
             )
 
         # ── Endpoint list ─────────────────────────────────────────────────
@@ -956,13 +1189,28 @@ def run_scan(args: argparse.Namespace) -> int:
         if args.group_endpoints and endpoints:
             grouping = group_endpoints(endpoints)
             if grouping.collapsed > 0:
-                console.print(
-                    f"  [bold cyan]⇄[/bold cyan] Grouped endpoints — "
-                    f"[bold]{len(endpoints)}[/bold] → [bold]{grouping.groups}[/bold] "
-                    f"distinct attack surface(s) "
-                    f"[dim]({grouping.collapsed} collapsed)[/dim]"
+                ui.status(
+                    console, theme, "group",
+                    f"Grouped endpoints — {len(endpoints)} {theme.glyphs.arrow} "
+                    f"{grouping.groups} distinct attack surface(s)",
+                    f"({grouping.collapsed} collapsed)",
                 )
             endpoints = grouping.representatives
+
+        # ── Host-level anchor for port_scan ───────────────────────────────
+        # port_scan operates on the target *host*, not on crawled pages. If the
+        # crawl produced no endpoint for the seed host (non-HTML landing page,
+        # auth wall, JSON API, …), inject a synthetic seed endpoint so the scan
+        # still runs against the reachable host rather than silently skipping.
+        if port_scan_enabled:
+            seed_host = urlsplit(args.target).hostname
+            have_seed_host = any(
+                urlsplit(ep.url).hostname == seed_host for ep in endpoints
+            )
+            if seed_host and not have_seed_host:
+                endpoints = list(endpoints) + [
+                    CrawledEndpoint(url=args.target, status_code=0, depth=0)
+                ]
 
         # ── Phase 3 & 4: Run scanner modules (live progress bar) ──────────
         # Build module instances.  XSSCheckModule accepts a use_threads kwarg
@@ -972,6 +1220,14 @@ def run_scan(args: argparse.Namespace) -> int:
             cls = MODULE_REGISTRY[name]
             if name == "xss_check":
                 return cls(requester, use_threads=threads > 1)  # type: ignore[call-arg]
+            if name == "port_scan":
+                inst = cls(requester)
+                inst.connect_timeout = float(getattr(args, "port_scan_timeout", 1.5))  # type: ignore[attr-defined]
+                inst.max_port_workers = max(1, threads)  # type: ignore[attr-defined]
+                ports = _parse_port_list(getattr(args, "ports", None))
+                if ports:
+                    inst.ports = ports  # type: ignore[attr-defined]
+                return inst
             return cls(requester)
 
         module_instances: List[BaseScannerModule] = [
@@ -979,18 +1235,19 @@ def run_scan(args: argparse.Namespace) -> int:
         ]
 
         total_probes = len(module_instances) * len(endpoints)
-        console.print(
-            f"\n  [bold]Phase 2 — Fuzzing[/bold]  "
-            f"[dim]{len(module_instances)} module(s) × {len(endpoints)} endpoint(s) "
-            f"= {total_probes} probe(s)[/dim]"
+        console.print()
+        ui.phase(
+            console, theme, 2, "Fuzzing",
+            f"{len(module_instances)} module(s) x {len(endpoints)} endpoint(s) "
+            f"= {total_probes} probe(s)",
         )
 
-        with _make_fuzz_progress(console) as fuzz_progress:
+        with _make_fuzz_progress(console, theme) as fuzz_progress:
             for module in module_instances:
                 task_id = fuzz_progress.add_task(
                     description=(
-                        f"[bold yellow]{module.name:<18}[/bold yellow]"
-                        f"[dim] waiting…[/dim]"
+                        f"[vortex.module]{module.name:<20}[/vortex.module]"
+                        f"[vortex.muted]waiting…[/vortex.muted]"
                     ),
                     total=len(endpoints),
                 )
@@ -1035,23 +1292,26 @@ def run_scan(args: argparse.Namespace) -> int:
                             fuzz_progress.update(
                                 task_id,
                                 description=(
-                                    f"[bold yellow]{module.name:<18}[/bold yellow]"
-                                    f"[dim]  {display_url}[/dim]"
+                                    f"[vortex.module]{module.name:<20}[/vortex.module]"
+                                    f"[vortex.muted]{display_url}[/vortex.muted]"
                                 ),
                             )
                             fuzz_progress.advance(task_id)
 
                 # Mark task complete with a summary label.
+                _found_style = "vortex.success" if module_findings else "vortex.muted"
                 fuzz_progress.update(
                     task_id,
                     description=(
-                        f"[bold yellow]{module.name:<18}[/bold yellow]"
-                        f"[bold green]  {len(module_findings)} finding(s)[/bold green]"
+                        f"[vortex.module]{module.name:<20}[/vortex.module]"
+                        f"[{_found_style}]{len(module_findings)} finding(s)[/{_found_style}]"
                     ),
                 )
 
-                logger.info(
-                    "  [%s] → [bold]%d[/bold] finding(s)",
+                # The progress row already shows this; keep the log for -v only
+                # and escape the module name so it isn't read as Rich markup.
+                logger.debug(
+                    "module %s produced %d finding(s)",
                     module.name,
                     len(module_findings),
                 )
@@ -1065,8 +1325,10 @@ def run_scan(args: argparse.Namespace) -> int:
                 if features:  # Only run detector if we have features
                     anomaly_findings = _anomaly_findings(features, valid_urls)
                     if anomaly_findings:
-                        logger.info(
-                            f"  [bold magenta]anomaly[/bold magenta] → [bold]{len(anomaly_findings)}[/bold] finding(s)"
+                        ui.status(
+                            console, theme, "info",
+                            f"{'anomaly':<20}{len(anomaly_findings)} finding(s)",
+                            "statistical outliers, informational",
                         )
                         all_findings.extend(anomaly_findings)
             except Exception as exc:  # noqa: BLE001
@@ -1113,6 +1375,7 @@ def run_scan(args: argparse.Namespace) -> int:
         scan_meta=scan_meta,
         console=console,
         deduplicate=False,
+        theme=theme,
     )
 
     reporter.print_terminal_summary()
@@ -1129,7 +1392,7 @@ def run_scan(args: argparse.Namespace) -> int:
             build_payload(kept_findings, args.target, args.webhook_format, exit_code, scan_meta),
         )
 
-    _export_issues(args, kept_findings, console)
+    _export_issues(args, kept_findings, console, theme)
 
     return exit_code
 
@@ -1138,10 +1401,13 @@ def _export_issues(
     args: argparse.Namespace,
     findings: List[Finding],
     console: Console,
+    theme: Optional[VortexTheme] = None,
 ) -> None:
     """Create GitHub / Jira issues for findings, if a tracker is configured."""
     if not (args.github_repo or args.jira_url):
         return
+
+    th = theme or get_theme()
 
     from core import issue_tracker  # noqa: PLC0415 — only needed when exporting
 
@@ -1154,9 +1420,10 @@ def _export_issues(
             res = issue_tracker.export_to_github(
                 session, args.github_repo, findings, args.issue_min_severity
             )
-            console.print(
-                f"  [bold green]✓[/bold green] GitHub: created {res.total_created} issue(s), "
-                f"skipped {res.skipped}, failed {res.failed}."
+            ui.status(
+                console, th, "ok",
+                f"GitHub: created {res.total_created} issue(s)",
+                f"skipped {res.skipped} {th.glyphs.bullet} failed {res.failed}",
             )
 
     if args.jira_url:
@@ -1170,9 +1437,10 @@ def _export_issues(
             res = issue_tracker.export_to_jira(
                 session, args.jira_url, args.jira_project, findings, args.issue_min_severity
             )
-            console.print(
-                f"  [bold green]✓[/bold green] Jira: created {res.total_created} issue(s), "
-                f"failed {res.failed}."
+            ui.status(
+                console, th, "ok",
+                f"Jira: created {res.total_created} issue(s)",
+                f"failed {res.failed}",
             )
 
 
@@ -1200,14 +1468,29 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
+    # Listing commands run before config.yaml is read, so the theme comes from
+    # --theme / VORTEX_THEME only.
+    try:
+        theme, no_color = _resolve_theme(args)
+    except ThemeError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
+    # ── --list-themes: preview every palette and exit ──────────────────────
+    if args.list_themes:
+        ui.theme_table(build_console(theme, no_color=no_color), theme)
+        return 0
+
     # ── --list-modules: print registry table and exit immediately ──────────
     if args.list_modules:
-        _print_module_table()
+        _print_module_table(build_console(theme, no_color=no_color), theme)
         return 0
 
     # ── Validate that --target is provided for actual scans ───────────────
     if not args.target:
-        parser.error("argument --target/-u is required when not using --list-modules.")
+        parser.error(
+            "argument --target/-u is required when not using --list-modules / --list-themes."
+        )
 
     return run_scan(args)
 

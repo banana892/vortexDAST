@@ -60,7 +60,8 @@ Headless browser automation via Playwright ensures coverage of modern Single Pag
 ## 3. CLI Usage
 
 ```text
-usage: vortexdast [-h] [--list-modules] [--target URL] [--max-depth N]
+usage: vortexdast [-h] [--list-modules] [--list-themes] [--theme NAME]
+                  [--no-color] [--target URL] [--max-depth N]
                   [--modules MODULES] [--recon-only] [--rate-limit RPS]
                   [--threads N] [--concurrency N] [--timeout SECS]
                   [--max-endpoints N] [--insecure] [--dynamic] [--config PATH]
@@ -77,6 +78,16 @@ options:
   --list-modules        Print a Rich table of all registered scanner modules
                         with their IDs and descriptions, then exit with code
                         0.
+  --list-themes         Print all available colour themes with a live palette
+                        preview, then exit with code 0.
+  --theme NAME          Terminal colour theme: minimal, mono, vortex, neon,
+                        matrix, dracula, nord, solarized, gruvbox. Default:
+                        minimal (near-monochrome). Run --list-themes to
+                        preview them. Also settable via config.yaml ui.theme
+                        or the VORTEX_THEME env var.
+  --no-color            Strip all colour from terminal output while keeping
+                        the layout. Applies on top of --theme; useful for logs
+                        and dumb terminals.
   --target, -u URL      Target base URL to scan (required unless --list-
                         modules). Example: https://target.example.com
   --max-depth N         Crawler BFS recursion depth (default: value from
@@ -86,6 +97,14 @@ options:
                         --list-modules to see all available IDs. Default: all
   --recon-only          Run only reconnaissance modules (tech_detect,
                         dir_fuzzer, param_fuzzer). Overrides --modules.
+  --port-scan           Enable the host-scoped TCP connect port scan (opt-in;
+                        excluded from --modules all). Scans only the target
+                        host — no CIDR/subnet expansion.
+  --ports LIST          Comma-separated ports and ranges, e.g.
+                        "22,80,8000-8100". Implies --port-scan. Default:
+                        curated common-ports list.
+  --port-scan-timeout SECS
+                        Per-port TCP connect timeout (default: 1.5).
   --rate-limit RPS      Override requests-per-second rate limit (0 =
                         disabled). Default from config.yaml (usually 5). Safe
                         to raise to 20.0 for authorised remote targets.
@@ -139,9 +158,67 @@ Examples:
   vortex -u https://app.local -k -m xss_check,sqli_check
   vortex -u http://target.com --max-depth 2 -o results.json
   vortex -u http://target.com --modules all --rate-limit 20 --concurrency 20
+  vortex -u http://target.com --port-scan
+  vortex -u http://target.com --ports 22,80,443,3306,6379,8000-8100
   vortex -u http://target.com --max-endpoints 10 --timeout 5 --rate-limit 10
   vortexdast -u http://target.com --dynamic --verbose
+  vortex --list-themes
+  vortex -u http://target.com --theme neon
+  vortex -u http://target.com --theme mono --no-color -o scan.json
 ```
+
+### 3.1 Terminal Themes
+
+Scan output is themed. Every colour the CLI prints goes through a semantic
+style token (`vortex.accent`, `sev.critical`, …) rather than a hard-coded
+colour, so one flag recolours the whole UI — scan header, progress bars,
+module table and the findings dashboard.
+
+The default is deliberately plain: **`minimal`** prints no wordmark, uses thin
+borders, and carries structure with bold/dim weights. Colour is spent only
+where it means something — severity, and success/warning/error. Richer
+palettes are opt-in.
+
+```bash
+vortex --list-themes                      # preview every palette side by side
+vortex -u http://target.local --theme neon
+```
+
+| Theme | Font colours |
+|---|---|
+| `minimal` | **Default.** Near-monochrome; colour only for severity and status |
+| `mono` | No colour at all, ASCII borders and marks — best for CI logs |
+| `vortex` | Brand palette: violet headings, cyan accents, rounded frames |
+| `neon` | High-contrast cyberpunk: magenta, electric cyan, heavy frames |
+| `matrix` | Single-hue green terminal, dim through phosphor bright |
+| `dracula` | Dracula: purple, pink and soft cyan on dark |
+| `nord` | Nord: cool arctic blues with muted accents |
+| `solarized` | Solarized Dark: low-glare base tones with warm accents |
+| `gruvbox` | Gruvbox: warm retro earth tones, amber and olive |
+
+Themes with a palette also draw a wordmark, framed panels and a themed
+spinner; `minimal` and `mono` stay flat and quiet.
+
+Selection follows the project's usual precedence:
+
+```text
+--theme flag  >  VORTEX_THEME env  >  config.yaml ui.theme  >  minimal
+```
+
+```yaml
+# config.yaml
+ui:
+  theme: minimal     # or mono | vortex | neon | matrix | dracula | nord | solarized | gruvbox
+  no_color: false    # strip colour, keep layout (same as --no-color / VORTEX_NO_COLOR=1)
+```
+
+`--no-color` (or `VORTEX_NO_COLOR=1`) strips colour from any theme while
+keeping the layout intact. The standard `NO_COLOR` environment variable is
+honoured by Rich as well.
+
+Without `--verbose`, per-request chatter from the crawler and requester is held
+back so the phase lines and dashboard stay readable; `-v` restores the full
+DEBUG stream.
 
 ## 4. Confidence Levels & Filtering
 

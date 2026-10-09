@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Tuple
+
+from core.theme import THEME_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +62,18 @@ def apply_profile(config: Dict[str, Any], profile: str) -> Dict[str, Any]:
 # Environment-variable overrides
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _as_bool(raw: str) -> bool:
+    """Parse a boolean env var; accepts 1/true/yes/on and 0/false/no/off."""
+    value = str(raw).strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off", ""):
+        return False
+    raise ValueError(f"{raw!r} is not a boolean")
+
+
 # env var → (config section, key, caster)
-_ENV_MAP = {
+_ENV_MAP: Dict[str, Tuple[str, str, Callable[[str], Any]]] = {
     "VORTEX_TIMEOUT":    ("requester", "timeout", int),
     "VORTEX_RATE_LIMIT": ("requester", "rate_limit_rps", float),
     "VORTEX_MAX_DEPTH":  ("crawler", "max_depth", int),
@@ -69,6 +81,8 @@ _ENV_MAP = {
     "VORTEX_CONCURRENCY": ("requester", "concurrency", int),
     "VORTEX_PROXY":      ("requester", "proxy", str),
     "VORTEX_USER_AGENT": ("requester", "user_agent", str),
+    "VORTEX_THEME":      ("ui", "theme", str),
+    "VORTEX_NO_COLOR":   ("ui", "no_color", _as_bool),
 }
 
 
@@ -84,7 +98,8 @@ def apply_env_overrides(
         try:
             value = caster(raw)
         except (TypeError, ValueError):
-            raise ConfigError(f"{var}={raw!r} is not a valid {caster.__name__}")
+            kind = getattr(caster, "__name__", str(caster)).lstrip("_")
+            raise ConfigError(f"{var}={raw!r} is not a valid {kind}")
         config.setdefault(section, {})[key] = value
         logger.info("Env override %s → %s.%s = %r", var, section, key, value)
     return config
@@ -134,6 +149,17 @@ def validate_config(config: Dict[str, Any]) -> None:
     if "max_depth" in crawler:
         _require(_is_int(crawler["max_depth"]) and crawler["max_depth"] >= 0,
                  "crawler.max_depth must be a non-negative integer")
+
+    ui = config.get("ui", {})
+    _require(isinstance(ui, dict), "'ui' section must be a mapping")
+    if ui.get("theme") is not None:
+        _require(isinstance(ui["theme"], str), "ui.theme must be a string")
+        _require(
+            ui["theme"].strip().lower() in THEME_NAMES,
+            f"ui.theme must be one of: {', '.join(THEME_NAMES)}",
+        )
+    if "no_color" in ui:
+        _require(isinstance(ui["no_color"], bool), "ui.no_color must be true or false")
 
     scope = config.get("scope", {})
     _require(isinstance(scope, dict), "'scope' section must be a mapping")

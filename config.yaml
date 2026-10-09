@@ -93,3 +93,19 @@ output:
 
   # Whether to print verbose scan progress to the terminal.
   verbose: false
+
+# ── Terminal Appearance ───────────────────────────────────────────────────────
+ui:
+  # Colour theme for CLI output. Run `vortex --list-themes` to preview them.
+  #   minimal   – default; near-monochrome, colour only for severity/status
+  #   mono      – no colour at all, ASCII borders (good for CI logs)
+  #   vortex    – brand violet/cyan
+  #   neon      – high-contrast cyberpunk
+  #   matrix    – single-hue green
+  #   dracula | nord | solarized | gruvbox – popular editor palettes
+  # Overridden by --theme and the VORTEX_THEME env var.
+  theme: minimal
+
+  # Strip all colour while keeping the layout. Equivalent to --no-color
+  # (or the VORTEX_NO_COLOR env var).
+  no_color: false
