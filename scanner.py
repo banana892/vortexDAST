@@ -540,6 +540,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-port TCP connect timeout for --port-scan (default: 1.5).",
     )
     parser.add_argument(
+        "--subnet",
+        default=None,
+        metavar="CIDR",
+        help=(
+            "Sweep an explicit CIDR range instead of just the target host, e.g. "
+            "'192.168.1.0/24'. Implies --port-scan. Only scan ranges you are "
+            "authorised to test. Host count is capped by --max-subnet-hosts."
+        ),
+    )
+    parser.add_argument(
+        "--max-subnet-hosts",
+        type=int,
+        default=1024,
+        metavar="N",
+        help=(
+            "Safety cap on hosts expanded from --subnet (default: 1024). A "
+            "larger range is rejected rather than scanned accidentally."
+        ),
+    )
+    parser.add_argument(
         "--rate-limit",
         type=float,
         default=None,
@@ -878,6 +898,44 @@ def _parse_port_list(raw: Optional[str]) -> Optional[List[int]]:
     return sorted(ports)
 
 
+def _parse_subnet(raw: Optional[str], max_hosts: int) -> Optional[List[str]]:
+    """
+    Expand a ``--subnet`` CIDR (or single IP) into a list of host IP strings.
+
+    Returns ``None`` when ``raw`` is empty. Uses host addresses only (network
+    and broadcast addresses are excluded for IPv4 blocks larger than /31).
+    Exits with an error on malformed input, or when the range expands to more
+    than ``max_hosts`` addresses — a guard against accidentally sweeping a
+    far larger network than intended.
+    """
+    if not raw or not raw.strip():
+        return None
+
+    import ipaddress  # noqa: PLC0415 — only needed for subnet mode
+
+    try:
+        network = ipaddress.ip_network(raw.strip(), strict=False)
+    except ValueError as exc:
+        print(f"[ERROR] Invalid --subnet value {raw!r}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if network.num_addresses > max_hosts:
+        print(
+            f"[ERROR] --subnet {raw} expands to {network.num_addresses} addresses, "
+            f"over the --max-subnet-hosts cap of {max_hosts}. Narrow the range "
+            f"or raise the cap explicitly.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # .hosts() drops network/broadcast for IPv4 /0../30; for /31 and /32 it
+    # yields the address(es) themselves.
+    hosts = [str(ip) for ip in network.hosts()]
+    if not hosts:  # e.g. a single-address /32 network object
+        hosts = [str(network.network_address)]
+    return hosts
+
+
 def _parse_custom_headers(raw_headers: Optional[List[str]]) -> Dict[str, str]:
     """
     Parse a list of ``"Name: Value"`` header strings into a dict.
@@ -1025,9 +1083,13 @@ def run_scan(args: argparse.Namespace) -> int:
     else:
         selected_modules = _resolve_modules(args.modules)
 
-    # --port-scan / --ports opt the host-scoped port scanner in (it is never
-    # part of "all"). --ports implies --port-scan.
-    port_scan_enabled = bool(getattr(args, "port_scan", False) or getattr(args, "ports", None))
+    # --port-scan / --ports / --subnet opt the port scanner in (it is never
+    # part of "all"). --ports and --subnet both imply --port-scan.
+    port_scan_enabled = bool(
+        getattr(args, "port_scan", False)
+        or getattr(args, "ports", None)
+        or getattr(args, "subnet", None)
+    )
     if port_scan_enabled and "port_scan" not in selected_modules:
         selected_modules.append("port_scan")
 
@@ -1227,6 +1289,12 @@ def run_scan(args: argparse.Namespace) -> int:
                 ports = _parse_port_list(getattr(args, "ports", None))
                 if ports:
                     inst.ports = ports  # type: ignore[attr-defined]
+                subnet_hosts = _parse_subnet(
+                    getattr(args, "subnet", None),
+                    int(getattr(args, "max_subnet_hosts", 1024)),
+                )
+                if subnet_hosts:
+                    inst.subnet_hosts = subnet_hosts  # type: ignore[attr-defined]
                 return inst
             return cls(requester)
 

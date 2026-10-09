@@ -11,7 +11,7 @@ import pytest
 
 import scanner
 from core.crawler import CrawledEndpoint
-from scanner import _parse_port_list
+from scanner import _parse_port_list, _parse_subnet
 
 
 def _make_endpoint(url: str, depth: int = 0) -> CrawledEndpoint:
@@ -89,6 +89,58 @@ def test_parse_port_list_rejects_out_of_range():
 def test_parse_port_list_rejects_garbage():
     with pytest.raises(SystemExit):
         _parse_port_list("abc")
+
+
+# ── Subnet parsing ─────────────────────────────────────────────────────────
+
+
+def test_parse_subnet_none_returns_none():
+    assert _parse_subnet(None, 1024) is None
+    assert _parse_subnet("  ", 1024) is None
+
+
+def test_parse_subnet_single_ip():
+    assert _parse_subnet("127.0.0.1", 1024) == ["127.0.0.1"]
+    assert _parse_subnet("127.0.0.1/32", 1024) == ["127.0.0.1"]
+
+
+def test_parse_subnet_small_block_drops_network_broadcast():
+    # /30 has 4 addresses; .hosts() yields the 2 usable ones.
+    assert _parse_subnet("192.168.1.0/30", 1024) == ["192.168.1.1", "192.168.1.2"]
+
+
+def test_parse_subnet_slash24_count():
+    assert len(_parse_subnet("10.0.0.0/24", 1024)) == 254
+
+
+def test_parse_subnet_rejects_over_cap():
+    with pytest.raises(SystemExit):
+        _parse_subnet("10.0.0.0/16", 1024)
+
+
+def test_parse_subnet_rejects_garbage():
+    with pytest.raises(SystemExit):
+        _parse_subnet("not-a-cidr", 1024)
+
+
+# ── Subnet sweep behaviour ─────────────────────────────────────────────────
+
+
+def test_subnet_sweep_scans_all_hosts_once():
+    listener = _Listener()
+    try:
+        mod = _module()
+        # Loopback aliases: 127.0.0.1 has the listener, 127.0.0.2 has nothing.
+        mod.subnet_hosts = ["127.0.0.1", "127.0.0.2"]
+        mod.ports = [listener.port]
+        mod.connect_timeout = 0.5
+        findings = mod.run(_make_endpoint(f"http://127.0.0.1:{listener.port}/"))
+        hosts = {f.extra["host"] for f in findings}
+        assert hosts == {"127.0.0.1"}  # only the host with the open port
+        # Subnet sweep runs exactly once regardless of further endpoints.
+        assert mod.run(_make_endpoint("http://127.0.0.1/other")) == []
+    finally:
+        listener.close()
 
 
 # ── Registry / opt-in behaviour ───────────────────────────────────────────────

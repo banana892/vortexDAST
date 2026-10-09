@@ -97,14 +97,19 @@ options:
                         --list-modules to see all available IDs. Default: all
   --recon-only          Run only reconnaissance modules (tech_detect,
                         dir_fuzzer, param_fuzzer). Overrides --modules.
-  --port-scan           Enable the host-scoped TCP connect port scan (opt-in;
-                        excluded from --modules all). Scans only the target
-                        host — no CIDR/subnet expansion.
+  --port-scan           Enable the TCP connect port scan (opt-in; excluded
+                        from --modules all). Scans the target host by default.
   --ports LIST          Comma-separated ports and ranges, e.g.
                         "22,80,8000-8100". Implies --port-scan. Default:
                         curated common-ports list.
   --port-scan-timeout SECS
                         Per-port TCP connect timeout (default: 1.5).
+  --subnet CIDR         Sweep an explicit CIDR range instead of just the
+                        target host, e.g. "192.168.1.0/24". Implies
+                        --port-scan. Only scan ranges you are authorised to
+                        test. Host count is capped by --max-subnet-hosts.
+  --max-subnet-hosts N  Safety cap on hosts expanded from --subnet (default:
+                        1024). A larger range is rejected, not scanned.
   --rate-limit RPS      Override requests-per-second rate limit (0 =
                         disabled). Default from config.yaml (usually 5). Safe
                         to raise to 20.0 for authorised remote targets.
@@ -160,6 +165,7 @@ Examples:
   vortex -u http://target.com --modules all --rate-limit 20 --concurrency 20
   vortex -u http://target.com --port-scan
   vortex -u http://target.com --ports 22,80,443,3306,6379,8000-8100
+  vortex -u http://target.com --subnet 192.168.1.0/24 --ports 22,80,443,3306
   vortex -u http://target.com --max-endpoints 10 --timeout 5 --rate-limit 10
   vortexdast -u http://target.com --dynamic --verbose
   vortex --list-themes

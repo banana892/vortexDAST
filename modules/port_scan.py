@@ -10,18 +10,21 @@ services the same host exposes alongside the web application, so that an
 exposed database, admin console, or legacy cleartext protocol is surfaced as
 a finding rather than missed.
 
-Deliberate scope constraints (safety by design)
------------------------------------------------
-* Only the exact host already in the scan's scope is probed.  There is **no**
-  CIDR / subnet expansion and **no** additional-host discovery — the scanner
-  cannot be pointed at a network range through this module.
+Scope & safety by design
+-------------------------
+* By default only the exact host already in the scan's scope is probed. A
+  wider sweep requires the operator to pass an **explicit** CIDR range via
+  ``--subnet``; there is no automatic host discovery, and the range is capped
+  by ``--max-subnet-hosts`` so an over-broad block is rejected rather than
+  scanned by accident.
 * It is a TCP *connect* scan (full three-way handshake via the OS socket
   stack), not a raw/stealth SYN scan, so it behaves like any ordinary client
   connecting to a port.
 * The module is **opt-in**: it is excluded from ``--modules all`` and only
-  runs when the operator passes ``--port-scan``.
-* The host is resolved once and the scan runs once per host, regardless of how
-  many endpoints were crawled.
+  runs when the operator passes ``--port-scan`` / ``--ports`` / ``--subnet``.
+* In single-host mode the scan runs once per host; in subnet mode the full
+  host list is swept exactly once, regardless of how many endpoints crawled.
+* Only scan hosts and ranges you are authorised to test.
 
 Findings
 --------
@@ -69,14 +72,19 @@ class PortScanModule(BaseScannerModule):
 
     name: str = "port_scan"
     description: str = (
-        "Opt-in TCP connect scan of the target host only. Discovers exposed "
-        "network services (databases, admin consoles, remote-access, legacy "
-        "cleartext protocols) and flags risky ones. No subnet/CIDR expansion."
+        "Opt-in TCP connect scan. Scans the target host by default, or an "
+        "explicit CIDR range via --subnet. Discovers exposed network services "
+        "(databases, admin consoles, remote-access, legacy cleartext "
+        "protocols) and flags risky ones."
     )
 
     # ── Operator-tunable knobs (set by scanner.py from CLI flags) ──────────
     #: Explicit port list override. ``None`` → use payloads/common_ports.json.
     ports: Optional[List[int]] = None
+    #: Explicit list of hosts/IPs to scan (e.g. an expanded CIDR range). When
+    #: set, these hosts are scanned instead of the per-endpoint target host.
+    #: ``None`` → derive the single host from each crawled endpoint's URL.
+    subnet_hosts: Optional[List[str]] = None
     #: Per-port connection timeout, seconds.
     connect_timeout: float = 1.5
     #: Max concurrent socket probes.
@@ -87,6 +95,7 @@ class PortScanModule(BaseScannerModule):
     def __init__(self, requester: Requester) -> None:
         super().__init__(requester)
         self._scanned_hosts: set[str] = set()
+        self._subnet_done: bool = False
         self._lock = threading.Lock()
         self._catalog = self._load_catalog()
 
@@ -121,21 +130,35 @@ class PortScanModule(BaseScannerModule):
     # ── Entry point ──────────────────────────────────────────────────────
 
     def run(self, endpoint: CrawledEndpoint) -> List[Finding]:
-        parts = urlsplit(endpoint.url)
-        host = parts.hostname
-        if not host:
-            return []
-
-        # Run exactly once per host across all crawled endpoints.
-        with self._lock:
-            if host in self._scanned_hosts:
-                return []
-            self._scanned_hosts.add(host)
-
         ports = self._target_ports()
         if not ports:
             logger.warning("port_scan: no ports to scan (empty catalog/override).")
             return []
+
+        # ── Subnet mode: scan the explicit host list once, in full. ────────
+        if self.subnet_hosts:
+            with self._lock:
+                if self._subnet_done:
+                    return []
+                self._subnet_done = True
+            logger.info(
+                "port_scan: subnet sweep — %d host(s) x %d port(s)",
+                len(self.subnet_hosts), len(ports),
+            )
+            findings: List[Finding] = []
+            for host in self.subnet_hosts:
+                for port, banner in self._scan_host(host, ports):
+                    findings.append(self._finding_for(host, port, banner))
+            return findings
+
+        # ── Single-host mode: scan the endpoint's host once. ───────────────
+        host = urlsplit(endpoint.url).hostname
+        if not host:
+            return []
+        with self._lock:
+            if host in self._scanned_hosts:
+                return []
+            self._scanned_hosts.add(host)
 
         logger.info("port_scan: scanning %d ports on %s", len(ports), host)
         open_ports = self._scan_host(host, ports)
