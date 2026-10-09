@@ -143,6 +143,41 @@ def test_subnet_sweep_scans_all_hosts_once():
         listener.close()
 
 
+def test_subnet_sweep_results_sorted_numerically():
+    mod = _module()
+    # Exercise the real ordering via a monkeypatched probe over a flat set.
+    hosts = ["127.0.0.10", "127.0.0.2"]
+    ports = [22, 80]
+    open_set = {("127.0.0.2", 22), ("127.0.0.2", 80), ("127.0.0.10", 80)}
+    mod._probe_port = lambda h, p: ((h, p) in open_set, "")  # type: ignore[assignment]
+    result = mod._scan_many(hosts, ports)
+    # 127.0.0.2 sorts before 127.0.0.10 numerically; ports ascending within host.
+    assert result == [
+        ("127.0.0.2", 22, ""),
+        ("127.0.0.2", 80, ""),
+        ("127.0.0.10", 80, ""),
+    ]
+
+
+def test_subnet_sweep_parallel_across_hosts():
+    # 8 "hosts" that each block for ~0.3s on probe. Sequential would be ~2.4s;
+    # a flat pool of 8 workers finishes in well under half that.
+    mod = _module()
+    hosts = [f"10.0.0.{i}" for i in range(1, 9)]
+    ports = [80]
+    mod.subnet_workers = 8
+
+    def slow_probe(host, port):
+        time.sleep(0.3)
+        return False, ""
+
+    mod._probe_port = slow_probe  # type: ignore[assignment]
+    start = time.monotonic()
+    mod._scan_many(hosts, ports)
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, f"sweep not parallel across hosts (took {elapsed:.2f}s)"
+
+
 # ── Registry / opt-in behaviour ───────────────────────────────────────────────
 
 

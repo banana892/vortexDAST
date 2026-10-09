@@ -24,6 +24,9 @@ Scope & safety by design
   runs when the operator passes ``--port-scan`` / ``--ports`` / ``--subnet``.
 * In single-host mode the scan runs once per host; in subnet mode the full
   host list is swept exactly once, regardless of how many endpoints crawled.
+  The subnet sweep runs every host x port probe in one flat thread pool
+  (``subnet_workers``) so timeouts on down hosts overlap instead of
+  serialising host-by-host.
 * Only scan hosts and ranges you are authorised to test.
 
 Findings
@@ -67,6 +70,16 @@ _RISK_TO_SEVERITY: Dict[str, Severity] = {
 _PRIVATE_PREFIXES = ("127.", "10.", "192.168.", "169.254.", "::1")
 
 
+def _sort_key(host: str):
+    """Sort hosts numerically when they are IP addresses, else lexically."""
+    try:
+        import ipaddress  # noqa: PLC0415
+
+        return (0, int(ipaddress.ip_address(host)))
+    except ValueError:
+        return (1, host)
+
+
 class PortScanModule(BaseScannerModule):
     """Host-scoped TCP connect scan for exposed network services."""
 
@@ -87,8 +100,12 @@ class PortScanModule(BaseScannerModule):
     subnet_hosts: Optional[List[str]] = None
     #: Per-port connection timeout, seconds.
     connect_timeout: float = 1.5
-    #: Max concurrent socket probes.
+    #: Max concurrent socket probes for a single host.
     max_port_workers: int = 20
+    #: Max concurrent socket probes for a subnet sweep (host×port pairs run in
+    #: one flat pool; higher than max_port_workers since sweeps are I/O-bound
+    #: and many hosts are typically down).
+    subnet_workers: int = 100
     #: Read up to this many bytes for a best-effort service banner.
     banner_bytes: int = 64
 
@@ -145,11 +162,11 @@ class PortScanModule(BaseScannerModule):
                 "port_scan: subnet sweep — %d host(s) x %d port(s)",
                 len(self.subnet_hosts), len(ports),
             )
-            findings: List[Finding] = []
-            for host in self.subnet_hosts:
-                for port, banner in self._scan_host(host, ports):
-                    findings.append(self._finding_for(host, port, banner))
-            return findings
+            open_hits = self._scan_many(self.subnet_hosts, ports)
+            return [
+                self._finding_for(host, port, banner)
+                for host, port, banner in open_hits
+            ]
 
         # ── Single-host mode: scan the endpoint's host once. ───────────────
         host = urlsplit(endpoint.url).hostname
@@ -165,6 +182,40 @@ class PortScanModule(BaseScannerModule):
         return [self._finding_for(host, port, banner) for port, banner in open_ports]
 
     # ── Scanning ───────────────────────────────────────────────────────────
+
+    def _scan_many(
+        self, hosts: List[str], ports: List[int]
+    ) -> List[Tuple[str, int, str]]:
+        """
+        Scan ``hosts`` × ``ports`` as one flat, parallel work set.
+
+        Every ``(host, port)`` probe is submitted to a single pool so that
+        connection timeouts on down hosts overlap instead of serialising
+        host-by-host — the key win when sweeping a mostly-dead range. Results
+        are returned sorted by ``(host, port)`` for deterministic output.
+        """
+        pairs = [(host, port) for host in hosts for port in ports]
+        if not pairs:
+            return []
+        workers = max(1, min(self.subnet_workers, len(pairs)))
+        results: List[Tuple[str, int, str]] = []
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="vdast-sweep"
+        ) as pool:
+            future_map = {
+                pool.submit(self._probe_port, host, port): (host, port)
+                for host, port in pairs
+            }
+            for future in as_completed(future_map):
+                host, port = future_map[future]
+                try:
+                    is_open, banner = future.result()
+                except Exception as exc:  # noqa: BLE001 — never abort the sweep
+                    logger.debug("port_scan: probe %s:%d errored: %s", host, port, exc)
+                    continue
+                if is_open:
+                    results.append((host, port, banner))
+        return sorted(results, key=lambda t: (_sort_key(t[0]), t[1]))
 
     def _scan_host(self, host: str, ports: List[int]) -> List[Tuple[int, str]]:
         """Return a sorted list of ``(port, banner)`` for every open port."""

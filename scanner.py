@@ -560,6 +560,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--subnet-workers",
+        type=int,
+        default=100,
+        metavar="N",
+        help=(
+            "Concurrent socket probes for a --subnet sweep (default: 100). "
+            "Host x port probes share one pool so down-host timeouts overlap."
+        ),
+    )
+    parser.add_argument(
         "--rate-limit",
         type=float,
         default=None,
@@ -1295,6 +1305,7 @@ def run_scan(args: argparse.Namespace) -> int:
                 )
                 if subnet_hosts:
                     inst.subnet_hosts = subnet_hosts  # type: ignore[attr-defined]
+                    inst.subnet_workers = max(1, int(getattr(args, "subnet_workers", 100)))  # type: ignore[attr-defined]
                 return inst
             return cls(requester)
 

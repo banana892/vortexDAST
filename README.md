@@ -110,6 +110,9 @@ options:
                         test. Host count is capped by --max-subnet-hosts.
   --max-subnet-hosts N  Safety cap on hosts expanded from --subnet (default:
                         1024). A larger range is rejected, not scanned.
+  --subnet-workers N    Concurrent socket probes for a --subnet sweep
+                        (default: 100). Host x port probes share one pool so
+                        down-host timeouts overlap.
   --rate-limit RPS      Override requests-per-second rate limit (0 =
                         disabled). Default from config.yaml (usually 5). Safe
                         to raise to 20.0 for authorised remote targets.
