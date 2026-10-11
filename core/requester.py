@@ -136,6 +136,13 @@ class Requester:
         self.max_workers = max_workers
         self._max_slot_wait = max_slot_wait
 
+        # ── Scope-aware redirect following (set via set_scope_guard) ───────
+        #: Optional object exposing ``is_in_scope(url) -> bool``. When set,
+        #: redirects are followed manually and any hop leaving scope is
+        #: dropped, so a hostile off-scope 30x can never carry a probe (its
+        #: params, body, cookies or auth header) to an unintended host.
+        self._scope_guard: Optional[Any] = None
+
         # ── Session-recovery hooks (set via set_session_recovery) ──────────
         #: (response) -> bool: False means the session was lost.
         self._session_validator: Optional[Callable[[Any], bool]] = None
@@ -383,6 +390,83 @@ class Requester:
             logger.warning(message)
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Scope-aware redirect following
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def set_scope_guard(self, guard: Optional[Any]) -> None:
+        """
+        Install a scope guard so redirects are followed only while they stay
+        in scope.
+
+        ``guard`` must expose ``is_in_scope(url: str) -> bool``. Once set,
+        :meth:`_dispatch` stops delegating redirect-following to ``requests``
+        (which follows any ``Location`` blindly) and instead walks the redirect
+        chain one hop at a time, checking each next URL against the guard. The
+        first off-scope hop is logged and **not** followed — the redirect
+        response is returned as-is — so a hostile target cannot use a 30x to
+        bounce a probe (its parameters, body, cookies or ``Authorization``
+        header) onto an unintended host. Pass ``None`` to restore the default
+        ``requests`` redirect behaviour.
+        """
+        self._scope_guard = guard
+
+    def _send_with_scoped_redirects(
+        self,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> "requests.Response":
+        """
+        Issue ``method url`` and follow redirects manually, dropping the first
+        hop that leaves scope.
+
+        Reuses ``requests``' own redirect machinery via ``response.next`` (the
+        pre-built :class:`~requests.PreparedRequest` for the next hop), so
+        method/body rewriting on 301/302/303, ``Authorization`` stripping on
+        cross-host hops, relative-``Location`` resolution and cookie extraction
+        all behave exactly as they would under native redirect following —
+        except that each hop's URL is first checked against the scope guard.
+        """
+        kwargs = dict(kwargs)
+        kwargs["allow_redirects"] = False
+        # requests populates ``response.next`` with the next PreparedRequest
+        # when allow_redirects is False; mirror its own default hop cap.
+        max_redirects = self.session.max_redirects
+        send_timeout = kwargs.get("timeout", self.timeout)
+        send_verify = kwargs.get("verify", self.verify_ssl)
+
+        response = self.session.request(method, url, **kwargs)
+
+        hops = 0
+        while response.is_redirect:
+            nxt = response.next  # PreparedRequest for the next hop, or None.
+            if nxt is None:
+                break
+            if hops >= max_redirects:
+                raise requests.exceptions.TooManyRedirects(
+                    f"Exceeded {max_redirects} redirects.", response=response
+                )
+            if self._scope_guard is not None and not self._scope_guard.is_in_scope(nxt.url):
+                logger.warning(
+                    "Blocked off-scope redirect: %s %s -> %s (out of scope; not followed)",
+                    method, response.url, nxt.url,
+                )
+                break
+            # Count this redirect hop against throttle/status tracking before
+            # we send the next one; the final (non-redirect) response is
+            # recorded by the caller in :meth:`_dispatch`.
+            self._record_status(response.status_code, response.headers)
+            response = self.session.send(
+                nxt,
+                allow_redirects=False,
+                timeout=send_timeout,
+                verify=send_verify,
+            )
+            hops += 1
+
+        return response
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Authenticated-session recovery
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -472,7 +556,14 @@ class Requester:
         kwargs.setdefault("verify", self.verify_ssl)
 
         try:
-            response = self.session.request(method, url, **kwargs)
+            # With a scope guard installed, follow redirects manually so an
+            # off-scope 30x can never carry a probe to an unintended host.
+            # Honour an explicit allow_redirects=False from the caller (and the
+            # no-guard case) by falling back to requests' native handling.
+            if self._scope_guard is not None and kwargs.get("allow_redirects", True):
+                response = self._send_with_scoped_redirects(method, url, **kwargs)
+            else:
+                response = self.session.request(method, url, **kwargs)
             logger.debug(
                 "%s %s → HTTP %d (%d bytes)",
                 method, url, response.status_code, len(response.content),

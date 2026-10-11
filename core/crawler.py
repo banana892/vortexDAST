@@ -492,6 +492,12 @@ class Crawler:
         """
         scope_guard = self._scope_guard or ScopeGuard.from_seed(seed_url, scope_config)
 
+        # Gate redirect following on the shared requester for the whole scan
+        # (crawl + fuzz phases): an off-scope 30x must not bounce a probe onto
+        # an unintended host. This is the single choke point every entry path
+        # reaches before any scanning request is issued.
+        self.requester.set_scope_guard(scope_guard)
+
         result = CrawlResult(seed_url=seed_url)
 
         seed_normalised = self._normalise_url(seed_url)

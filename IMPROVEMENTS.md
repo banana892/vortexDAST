@@ -200,10 +200,13 @@ Ordered by impact; several are now *resolved by the plan above*.
 
 ### Operational / safety (independent of the toolset)
 
-- **Redirect scope escape** — `Requester` follows redirects via the `requests`
-  default and never consults `ScopeGuard`; an off-scope 301/302 can carry
-  probes to an unintended host. **Fix before any external engagement** (and
-  before orchestration amplifies it).
+- **Redirect scope escape** — ✅ *fixed.* `Requester.set_scope_guard()` makes
+  redirect following scope-aware: the crawler installs the `ScopeGuard` on the
+  shared requester before any scan request, and `_dispatch` then walks the
+  redirect chain one hop at a time (via `response.next`, reusing requests'
+  method/auth/cookie rebuilding), dropping and logging the first hop that
+  leaves scope. An off-scope 30x can no longer carry a probe to an unintended
+  host. Native behaviour is retained when no guard is set.
 - **API auth fails open** — `core/api.py` allows all requests when
   `VORTEX_API_KEY` is unset. Should fail closed or require an explicit
   `--allow-unauthenticated`.
