@@ -79,7 +79,8 @@ if _ROOT not in sys.path:
 
 from core import crawl_cache
 from core.auth import FormLoginAuthenticator, parse_login_data
-from core.crawler import CrawlResult, CrawledEndpoint, Crawler
+from core.crawler import CrawlResult, CrawledEndpoint, Crawler, ScopeGuard
+from core.dom_watcher import DomWatcher
 from core.endpoint_group import group_endpoints
 from core.profiles import (
     PROFILE_NAMES,
@@ -866,6 +867,56 @@ def _build_parser() -> argparse.ArgumentParser:
             "triggering automatic re-authentication (e.g. 'Please log in')."
         ),
     )
+    parser.add_argument(
+        "--no-csrf-harvest",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable automatic CSRF-token harvesting: by default, the login "
+            "(and MFA, if configured) page is fetched first and any hidden "
+            "form fields it has — the usual home for a per-session CSRF "
+            "token — are merged into the submission."
+        ),
+    )
+    parser.add_argument(
+        "--mfa-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "A second login step submitted after --login-url succeeds, for "
+            "multi-step/MFA logins. Requires --mfa-data."
+        ),
+    )
+    parser.add_argument(
+        "--mfa-data",
+        default=None,
+        metavar="FIELDS",
+        help=(
+            "MFA step fields, same 'name=value&...' syntax as --login-data. "
+            "A value of '{totp:BASE32SECRET}' is replaced with a live RFC "
+            "6238 code at submission time (and on every re-auth) — use this "
+            "for an authenticator-app MFA secret rather than a code that "
+            "would expire; a fixed backup code also works as a plain value."
+        ),
+    )
+    parser.add_argument(
+        "--mfa-method",
+        choices=["POST", "GET", "post", "get"],
+        default="POST",
+        help="HTTP method for the MFA request (default: POST).",
+    )
+    parser.add_argument(
+        "--mfa-success-text",
+        default=None,
+        metavar="TEXT",
+        help="Substring that must appear in a successful MFA response.",
+    )
+    parser.add_argument(
+        "--mfa-failure-text",
+        default=None,
+        metavar="TEXT",
+        help="Substring that marks a failed/rejected MFA code.",
+    )
 
     # ── Finding filters ─────────────────────────────────────────────────────────
     parser.add_argument(
@@ -1095,6 +1146,46 @@ def _resolve_tools(tools_arg: Optional[str]) -> List[str]:
             seen.add(name)
             ordered.append(name)
     return ordered
+
+
+#: Recon adapters other tools' *discoveries* feed: nmap's open ports and
+#: subfinder's discovered subdomains let httpx probe beyond the seed URL's
+#: own host:port, and httpx's confirmed live services are what the
+#: content/vuln scanners below fan out across. Fixed priority (vs. whatever
+#: order --tools/"all" happens to list them in) is what makes that discovery
+#: data actually exist by the time it's needed. nmap and subfinder don't
+#: depend on each other, so they share a tier; httpx must come after both.
+_TOOL_EXECUTION_PRIORITY: Dict[str, int] = {"nmap": 0, "subfinder": 0, "httpx": 1}
+
+#: Adapters that test a *URL's content* (templates/wordlists/misconfig/TLS)
+#: rather than a specific query parameter — these are the ones that benefit
+#: from running again against each live service httpx discovers. sqlmap and
+#: interactsh test query *parameters*, which a bare discovered host:port
+#: doesn't have, so running them again there would just be wasted work.
+_PER_URL_TOOLS = frozenset({"nuclei", "ffuf", "nikto", "testssl"})
+
+#: Hard cap on how many discovered URLs a per-URL tool fans out across, so
+#: a host with many open ports can't turn one adapter into dozens of runs.
+_MAX_CHAINED_URLS = 10
+
+
+def _run_adapter_per_url(tool_name: str, urls: List[str], ctx: ScanContext) -> List[Finding]:
+    """
+    Run a fresh adapter instance of ``tool_name`` against each of ``urls``,
+    merging the findings. A fresh instance per URL avoids any per-run state
+    an adapter keeps on itself (e.g. sqlmap's per-run port/credentials)
+    leaking between otherwise-independent runs.
+    """
+    findings: List[Finding] = []
+    for url in urls[:_MAX_CHAINED_URLS]:
+        adapter = get_adapter(tool_name)
+        if adapter is None:  # pragma: no cover — guarded by _resolve_tools
+            continue
+        try:
+            findings.extend(adapter.run(url, ctx))
+        except Exception as exc:  # noqa: BLE001 — one tool/URL must not sink the scan
+            logger.error("Tool '%s' raised against chained URL %s: %s", tool_name, url, exc)
+    return findings
 
 
 def _parse_port_list(raw: Optional[str]) -> Optional[List[int]]:
@@ -1412,6 +1503,16 @@ def run_scan(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"[ERROR] invalid --login-data: {exc}", file=sys.stderr)
             return 2
+        mfa_data: Optional[Dict[str, str]] = None
+        if getattr(args, "mfa_url", None):
+            if not getattr(args, "mfa_data", None):
+                print("[ERROR] --mfa-url requires --mfa-data.", file=sys.stderr)
+                return 2
+            try:
+                mfa_data = parse_login_data(args.mfa_data)
+            except ValueError as exc:
+                print(f"[ERROR] invalid --mfa-data: {exc}", file=sys.stderr)
+                return 2
         authenticator = FormLoginAuthenticator(
             login_url=args.login_url,
             credentials=credentials,
@@ -1419,6 +1520,12 @@ def run_scan(args: argparse.Namespace) -> int:
             success_text=args.login_success_text,
             failure_text=args.login_failure_text,
             logged_out_text=args.logged_out_text,
+            harvest_hidden_fields=not args.no_csrf_harvest,
+            mfa_url=args.mfa_url,
+            mfa_data=mfa_data,
+            mfa_method=args.mfa_method,
+            mfa_success_text=args.mfa_success_text,
+            mfa_failure_text=args.mfa_failure_text,
         )
         if not authenticator.login(requester):
             ui.status(
@@ -1428,7 +1535,10 @@ def run_scan(args: argparse.Namespace) -> int:
             )
             requester.close()
             return 1
-        ui.status(console, theme, "ok", "Authenticated", f"session established via {args.login_url}")
+        auth_detail = f"session established via {args.login_url}"
+        if args.mfa_url:
+            auth_detail += " + MFA"
+        ui.status(console, theme, "ok", "Authenticated", auth_detail)
         # Recovery only makes sense when a logged-out signal is configured.
         if args.logged_out_text:
             requester.set_session_recovery(
@@ -1536,11 +1646,29 @@ def run_scan(args: argparse.Namespace) -> int:
             logger.warning("No endpoints were crawled. Check target URL and network connectivity.")
 
         # ── Phase 2: Dynamic crawl (optional) ─────────────────────────────
-        if args.dynamic:
+        # Additive: re-crawls the same seed with JS rendered and merges in
+        # only the endpoints the static pass could never have seen (an SPA
+        # shell with no server-rendered links/forms). Anything the static
+        # crawl already found is left exactly as it was.
+        dynamic_enabled = args.dynamic or bool(crawler_cfg.get("dynamic_crawl", False))
+        if dynamic_enabled:
+            ui.phase(console, theme, 2, "Dynamic crawl", f"Playwright, max depth {max_depth}")
+            scope_guard = ScopeGuard.from_seed(args.target, scope_cfg)
+            dynamic_result = DomWatcher(max_depth=max_depth).crawl(
+                args.target, scope_guard=scope_guard
+            )
+
+            existing_urls = crawl_result.all_urls
+            new_endpoints = [
+                ep for ep in dynamic_result.endpoints if ep.url not in existing_urls
+            ]
+            crawl_result.endpoints.extend(new_endpoints)
+
             ui.status(
-                console, theme, "warn",
-                "Dynamic Playwright crawl requested",
-                "not yet implemented in this phase",
+                console, theme,
+                "ok" if new_endpoints else "info",
+                f"Dynamic crawl complete — {len(new_endpoints)} new endpoint(s)",
+                f"({len(dynamic_result.failed_urls)} failed)",
             )
 
         # ── Endpoint list ─────────────────────────────────────────────────
@@ -1574,7 +1702,7 @@ def run_scan(args: argparse.Namespace) -> int:
                     CrawledEndpoint(url=args.target, status_code=0, depth=0)
                 ]
 
-        # ── Phase 3 & 4: Run scanner modules (live progress bar) ──────────
+        # ── Phase 3: Run scanner modules (live progress bar) ──────────────
         # Build module instances.  XSSCheckModule accepts a use_threads kwarg
         # to tune its internal concurrency based on the --threads setting.
         def _make_module(name: str) -> BaseScannerModule:
@@ -1608,7 +1736,7 @@ def run_scan(args: argparse.Namespace) -> int:
         total_probes = len(module_instances) * len(endpoints)
         console.print()
         ui.phase(
-            console, theme, 2, "Fuzzing",
+            console, theme, 3, "Fuzzing",
             f"{len(module_instances)} module(s) x {len(endpoints)} endpoint(s) "
             f"= {total_probes} probe(s)",
         )
@@ -1688,14 +1816,14 @@ def run_scan(args: argparse.Namespace) -> int:
                 )
                 all_findings.extend(module_findings)
 
-        # ── Phase 3: External-tool orchestration (optional) ────────────────
+        # ── Phase 4: External-tool orchestration (optional) ────────────────
         # Drive best-of-breed external tools (nuclei, nmap, httpx, …) and fold
         # their output into the same Finding list. Each adapter self-detects:
         # a missing binary falls back to a built-in equivalent or skips.
         if selected_tools:
             console.print()
             ui.phase(
-                console, theme, 3, "External tools",
+                console, theme, 4, "External tools",
                 f"{len(selected_tools)} adapter(s) {theme.glyphs.dash} "
                 + ", ".join(selected_tools),
             )
@@ -1718,31 +1846,63 @@ def run_scan(args: argparse.Namespace) -> int:
             ctx.extra["headers"] = auth_headers
             ctx.extra["cookie"] = args.cookie
             ctx.extra["ffuf_wordlist"] = getattr(args, "ffuf_wordlist", None)
-            # Data passing: seed any open ports the built-in port scan already
-            # found so a later tool could consume them.
+            # Data passing: seed any open ports a port scan already produced
+            # *before* this loop (e.g. the built-in --port-scan module) so
+            # httpx can probe them too. nmap's own findings, produced inside
+            # this same loop, are seeded as they come back — see below.
             for finding in all_findings:
-                if finding.extra.get("module") == "port_scan":
+                if finding.extra.get("tool") == "nmap" or finding.extra.get("module") == "port_scan":
                     _host = finding.extra.get("host")
                     _port = finding.extra.get("port")
                     if _host and isinstance(_port, int):
                         ctx.open_ports.setdefault(_host, []).append(_port)
 
-            for tool_name in selected_tools:
+            # nmap/subfinder, then httpx, run first regardless of --tools'
+            # own order: the discovery data they produce
+            # (ctx.open_ports/discovered_hosts/http_services) only exists
+            # once they've actually run, and later tools below depend on it
+            # being there already.
+            ordered_tools = sorted(
+                selected_tools,
+                key=lambda name: _TOOL_EXECUTION_PRIORITY.get(name, len(_TOOL_EXECUTION_PRIORITY)),
+            )
+
+            for tool_name in ordered_tools:
                 adapter = get_adapter(tool_name)
                 if adapter is None:  # pragma: no cover — guarded by _resolve_tools
                     continue
                 installed = adapter.is_available()
                 try:
-                    tool_findings = adapter.run(args.target, ctx)
+                    if tool_name in _PER_URL_TOOLS and ctx.http_services:
+                        # Always include the seed target itself (never a
+                        # regression from today) plus every live service
+                        # httpx discovered beyond it.
+                        chained_urls = list(dict.fromkeys([args.target, *ctx.http_services]))
+                        tool_findings = _run_adapter_per_url(tool_name, chained_urls, ctx)
+                    else:
+                        tool_findings = adapter.run(args.target, ctx)
                 except Exception as exc:  # noqa: BLE001 — one tool must not sink the scan
                     logger.error("Tool '%s' raised: %s", tool_name, exc, exc_info=args.verbose)
                     tool_findings = []
 
-                # Chain live HTTP base URLs forward for later adapters.
+                # Chain discovered open ports (nmap), discovered subdomains
+                # (subfinder) and live HTTP base URLs (httpx) — all just run
+                # — forward to adapters later in ordered_tools — this is the
+                # step that actually makes the fixed priority order pay off.
                 for finding in tool_findings:
+                    if finding.extra.get("tool") == "nmap":
+                        _host = finding.extra.get("host")
+                        _port = finding.extra.get("port")
+                        if _host and isinstance(_port, int):
+                            ports = ctx.open_ports.setdefault(_host, [])
+                            if _port not in ports:
+                                ports.append(_port)
                     svc = finding.extra.get("http_service_url")
                     if svc and svc not in ctx.http_services:
                         ctx.http_services.append(svc)
+                    host = finding.extra.get("discovered_host")
+                    if host and host not in ctx.discovered_hosts:
+                        ctx.discovered_hosts.append(host)
 
                 note = "" if installed else "(binary not installed — fallback/skip)"
                 ui.status(

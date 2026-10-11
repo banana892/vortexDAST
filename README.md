@@ -29,11 +29,10 @@ between what runs today and what is planned — see
 | Reporting: terminal, JSON, HTML, Markdown, SARIF 2.1.0; CVSS v3.1 | ✅ Shipped |
 | REST API mode, CI/CD exit codes, webhook notifications | ✅ Shipped |
 | Host-scoped TCP port scan + explicit CIDR subnet sweep | ✅ Shipped (opt-in) |
-| Form-login authentication + mid-scan session recovery | ✅ Shipped (scaffold) |
-| **Tool orchestration** — framework + nuclei / nmap / httpx / ffuf adapters (`--tools`) | ✅ Shipped (opt-in) |
-| sqlmap / interactsh adapters (Phase C) | 🚧 Planned |
-| **JavaScript / SPA rendering** (`--dynamic` Playwright crawl) | 🚧 Planned — currently a stub |
-| **Out-of-band (OAST)** testing for blind vulns | 🚧 Planned (via interactsh) |
+| Form-login auth: CSRF harvesting, multi-step/MFA (TOTP), session recovery | ✅ Shipped |
+| **Tool orchestration** — 9 adapters: nuclei, nmap, httpx, ffuf, sqlmap, interactsh, nikto, testssl.sh, subfinder (`--tools`) | ✅ Shipped (opt-in) |
+| **Out-of-band (OAST)** testing for blind SSRF (via interactsh) | ✅ Shipped (opt-in) |
+| **JavaScript / SPA rendering** (`--dynamic`, headless Chromium) | ✅ Shipped (opt-in) |
 | **API / OpenAPI import + JSON-body fuzzing** | 🚧 Planned |
 
 ---
@@ -45,6 +44,7 @@ git clone https://github.com/banana892/vortexDAST.git
 cd vortexDAST
 pip install -e .            # core scanner + CLI (`vortex` / `vortexdast`)
 pip install -e ".[api]"     # optional: REST API mode (`vortex-api`)
+playwright install chromium # optional: needed only for --dynamic (SPA crawl)
 ```
 
 Python 3.11+ recommended.
@@ -65,7 +65,8 @@ vortex -u https://app.local -o report.html   # write an HTML report
 vortex -u https://app.local -m xss_check,sqli_check   # run specific modules
 ```
 
-Authenticated scan (form login, with mid-scan session recovery):
+Authenticated scan (form login, with mid-scan session recovery; a per-session
+CSRF token on the login page is harvested and submitted automatically):
 
 ```bash
 vortex -u https://app.local/ \
@@ -73,6 +74,28 @@ vortex -u https://app.local/ \
   --login-data "username=admin&password=s3cret" \
   --login-success-text "Sign out" \
   --logged-out-text "Please log in"
+```
+
+With MFA (a second step after login; `{totp:SECRET}` computes a live RFC 6238
+code at submission time and again on every re-auth — a fixed code would
+expire):
+
+```bash
+vortex -u https://app.local/ \
+  --login-url https://app.local/login \
+  --login-data "username=admin&password=s3cret" \
+  --mfa-url https://app.local/mfa \
+  --mfa-data "otp={totp:JBSWY3DPEHPK3PXP}" \
+  --mfa-success-text "Sign out" \
+  --logged-out-text "Please log in"
+```
+
+JS-rendered SPA (opt-in; headless Chromium renders each page before the
+crawler extracts links/forms — closes modern SPAs that show nothing to a
+plain HTTP GET):
+
+```bash
+vortex -u https://app.local --dynamic
 ```
 
 Network recon (opt-in; scans the target host, or an explicit range):
@@ -89,12 +112,27 @@ vortex --list-tools                               # adapters + install state
 vortex -u https://app.local --tools nuclei        # add nuclei's template checks
 vortex -u https://app.local --tools nmap,httpx    # recon: ports + live HTTP
 vortex -u https://app.local --tools ffuf --ffuf-wordlist big.txt  # content discovery
+vortex -u https://app.local --tools sqlmap        # confirm/exploit SQLi leads
+vortex -u https://app.local --tools interactsh    # confirm blind SSRF via OOB callback
+vortex -u https://app.local --tools nikto         # web-server misconfig / known-file scan
+vortex -u https://app.local --tools testssl       # deep TLS/cipher/cert analysis
+vortex -u https://app.local --tools subfinder,httpx  # subdomains + which are live
 vortex -u https://app.local --tools all --tool-timeout 300
 ```
 
 Tool findings are folded into the same report, dedup, filters and CI exit code
 as the built-in modules. A missing tool never fails the scan: nmap falls back to
 the built-in TCP port scan; the others are skipped with a clear note.
+
+**Data-chaining**: select more than one tool and they actually feed each
+other — `nmap`'s discovered open ports and `subfinder`'s discovered
+subdomains both get probed by `httpx`, and every URL `httpx` confirms live
+gets templated/fuzzed/misconfig-checked/TLS-analysed by
+`nuclei`/`ffuf`/`nikto`/`testssl` too, not just the one URL you gave `-u`:
+
+```bash
+vortex -u https://app.local --tools nmap,httpx,nuclei,nikto --tool-timeout 600
+```
 
 ---
 
@@ -117,13 +155,15 @@ the built-in TCP port scan; the others are skipped with a clear note.
    │   runs it as a subprocess, parses its JSON/XML, and maps    │
    │   the results into VortexDAST Findings:                     │
    │                                                             │
-   │     shipped:  nmap ─ httpx ─ nuclei ─ ffuf                  │
-   │     planned:  sqlmap ─ interactsh ─ nikto ─ …               │
+   │     shipped:  nmap ─ httpx ─ nuclei ─ ffuf ─ sqlmap ─        │
+   │               interactsh ─ nikto ─ testssl.sh ─ subfinder    │
    │   (detect-if-installed; built-in fallback when absent)      │
    └───────────────────────────────────────────────────────────┘
 ```
 
-- **Core** is the web-app scanner: a concurrent crawler, auto-discovered
+- **Core** is the web-app scanner: a concurrent crawler, an optional headless-
+  Chromium dynamic crawl (`core/dom_watcher.py`, `--dynamic`) that renders JS
+  and feeds the same `HTMLParser` the static crawler uses, auto-discovered
   scanner modules (`modules/`), a shared thread-safe `Requester`, and a
   reporter. This is VortexDAST's own depth and is fully implemented.
 - **Orchestration layer** (`core/orchestrator.py` + `adapters/`) runs
@@ -164,11 +204,13 @@ Key flag groups (run `vortex -h` for the full list):
   `--list-modules`
 - **Auth:** `--cookie`, `--header`, `--auth-user/--auth-pass` (Basic/Digest),
   `--login-url` + `--login-data` (form login), `--logged-out-text` (session
-  recovery)
+  recovery), `--no-csrf-harvest` (disable hidden-field harvesting), `--mfa-url`
+  + `--mfa-data` + `--mfa-method` + `--mfa-success-text` + `--mfa-failure-text`
+  (multi-step/MFA, with `{totp:SECRET}` for a live code)
 - **Network recon (opt-in):** `--port-scan`, `--ports`, `--subnet`,
   `--max-subnet-hosts`, `--subnet-workers`
 - **External tools (opt-in):** `--tools` (`all` or a comma list, e.g.
-  `nuclei,nmap,httpx,ffuf`), `--no-tools` (force built-ins only), `--tool-timeout`
+  `nuclei,nmap,httpx,ffuf,sqlmap,interactsh,nikto,testssl,subfinder`), `--no-tools` (force built-ins only), `--tool-timeout`
   (hard per-tool cap, default 600 s), `--ffuf-wordlist`, `--list-tools`. Tools
   that send HTTP (ffuf) honour `--rate-limit`, `--threads`, `--cookie` and `-H`
 - **Throughput:** `--rate-limit`, `--threads/--concurrency`, `--timeout`,
@@ -177,8 +219,9 @@ Key flag groups (run `vortex -h` for the full list):
   `--min-severity`, `--min-confidence`, `--suppress`, `--verbose`
 - **Presentation:** `--theme`, `--list-themes`, `--no-color`
 
-> **Note:** `--dynamic` (Playwright SPA crawl) is a **planned stub** — it logs
-> a warning and does not yet render JavaScript. Tracked in `IMPROVEMENTS.md`.
+> **Note:** `--dynamic` (headless-Chromium SPA crawl) is a real feature, not a
+> stub — see the dynamic-crawl example below. It's additive to the static
+> crawl and needs the browser binary: `playwright install chromium`.
 
 ### Terminal themes
 

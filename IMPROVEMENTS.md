@@ -149,32 +149,135 @@ early adapters there.
 3. **httpx** — the glue connecting nmap's open ports to the web scan. Live
    base URLs are chained forward via `ScanContext.http_services`.
 
-**Known follow-ups:** adapters currently each target the seed URL. The
-data-chaining plumbing exists (`ScanContext.open_ports` is seeded from
-`port_scan`, `http_services` from httpx) but no adapter *consumes* it yet —
-e.g. httpx probing every nmap-discovered port, nuclei templating every live
-httpx URL. That consumption is the Phase E "full data-chaining" item.
+**Known follow-up, since resolved:** adapters used to each only ever target
+the seed URL — see Phase E's "full data-chaining," now shipped.
 
 ### Phase C — Tier-2 adapters (depth)
-4. **sqlmap** (REST API) — turns "possible SQLi" leads into confirmed findings.
-5. **interactsh** — OAST listener; unlocks the blind-vuln classes (§5.4).
+4. **sqlmap** (REST API) — ✅ *shipped.* `adapters/sqlmap_adapter.py` drives
+   `sqlmapapi -s` (bound to `127.0.0.1`, random ephemeral port + per-run
+   credentials), creates a task, sets `url`/`batch`, starts the scan, polls
+   `/scan/<id>/status` under the usual `--tool-timeout` budget (killing the
+   engine if the budget elapses), and maps the `TECHNIQUES` content type from
+   `/scan/<id>/data` into `Finding`s (place, parameter, DBMS, technique list,
+   payload) — turning a "possible SQLi" lead into a confirmed one. The target
+   reaches sqlmap only as an HTTP JSON value, never argv/shell, so there's no
+   command-injection surface at all here. Requires `sqlmapapi` on `PATH`
+   (bundled with sqlmap; a wrapper script is enough — see Contributing).
+5. **interactsh** — ✅ *shipped.* `adapters/interactsh_adapter.py` drives
+   `interactsh-client`, asking it to generate one unique correlation domain
+   **per query parameter** on the target (`-n`), substitutes each into that
+   one parameter (others untouched), waits out a short grace period, then
+   reads back any DNS/HTTP callback (`-json -o`) and attributes it to the
+   exact parameter that caused it. Confirms genuinely *blind* SSRF — a server
+   that fetches the attacker's URL but reflects nothing back, which
+   `ssrf_check`'s reflection-based heuristic cannot see — closing the §5 item
+   4 OAST gap for the one seed URL each adapter currently gets. A target with
+   no query parameters is skipped without starting the client (nothing to
+   probe). Not yet wired into sqli/xxe/command-injection OOB confirmation —
+   SSRF-only for v1.
 
 ### Phase D — Our own web-app depth (unique value, not outsourced)
 These are the things no external tool gives us and that define VortexDAST's
 own quality:
-- **JavaScript/SPA rendering** — replace the `--dynamic` stub with a real
-  Playwright/CDP crawl worker (`core/dom_watcher.py`). Unblocks modern apps.
+- **JavaScript/SPA rendering** — ✅ *shipped.* `core/dom_watcher.py`'s
+  `DomWatcher` replaces the `--dynamic` stub with a real headless-Chromium
+  BFS crawl: renders each page, waits for the network to settle, then hands
+  the rendered DOM to the *same* `HTMLParser` the static crawler uses — so
+  every downstream module/dedup/report field behaves identically; the only
+  difference is where the HTML came from. Wired into `scanner.py` as an
+  additive Phase 2 (`--dynamic` or `crawler.dynamic_crawl: true`): it
+  re-crawls the seed with JS rendered and merges in only the endpoints the
+  static pass could never have seen, leaving everything static already
+  found untouched. Verified against a fake SPA whose links/forms exist only
+  after an inline `<script>` runs (0 found statically, fully discovered
+  dynamically). Sequential (one browser, no concurrency — Playwright's sync
+  API isn't thread-safe the way the static crawler's pool needs) and
+  unauthenticated (doesn't carry the scan's cookie jar into the browser
+  context yet — that's the authenticated-scanning follow-up below, not
+  done here).
 - **API testing** — OpenAPI/Swagger/Postman import + REST path-parameter and
   JSON-body fuzzing across modules.
 - **Authenticated scanning — follow-ups** on the shipped scaffold (§5.1):
-  OAuth2/OIDC, login-page CSRF-token harvesting, multi-step/MFA, role matrix.
+  - ✅ *shipped:* **login-page CSRF-token harvesting** — `core/auth.py`
+    GETs the login (and MFA) page first and merges any hidden form fields
+    (the usual home for a per-session token) underneath the configured
+    ones, via the same `HTMLParser` the crawler uses. On by default,
+    silent no-op against a page that doesn't need it
+    (`--no-csrf-harvest` to disable).
+  - ✅ *shipped:* **multi-step / MFA** — an optional second step
+    (`--mfa-url` + `--mfa-data`) submitted after a successful primary
+    login. A field value of `{totp:BASE32SECRET}` is replaced with a live
+    RFC 6238 code at submission time *and on every re-authentication* —
+    verified against the RFC's published SHA-1 test vectors — so a real
+    authenticator-app MFA flow can be scanned unattended; a fixed backup
+    code works too.
+  - 🚧 *not done:* **OAuth2/OIDC** token flows, and a multi-identity
+    **role matrix** (scan as two credentials, diff what each can reach to
+    surface broken access control) — both are a different shape of work
+    from the form-login scaffold above and still need their own design.
 
 ### Phase E — Tier-3 adapters + chaining polish
 - ~~ffuf~~ ✅ shipped early (curated-catalogue default wordlist, `-ac`
-  soft-404 calibration, honours rate limit/threads/auth); nikto, subfinder,
-  testssl.sh adapters remain.
-- Full data-chaining across the pipeline and a combined recon→exploit report
-  view.
+  soft-404 calibration, honours rate limit/threads/auth).
+- ✅ **nikto** shipped. `adapters/nikto_adapter.py` — nikto only writes JSON
+  to a file (never stdout), so this one overrides `run()` to point it at a
+  temp path and read that back; same argv-safety/timeout/fallback shape as
+  every other adapter otherwise. nikto's JSON carries **no severity at
+  all** (it surfaces candidates for human triage, not confirmed findings —
+  its own docs say so), so everything maps to INFORMATIONAL/TENTATIVE
+  except a finding whose `references` cites a CVE, bumped to MEDIUM/FIRM.
+- ✅ **testssl.sh** shipped. `adapters/testssl_adapter.py` — same
+  file-based-output shape as nikto, but testssl.sh carries its **own**
+  severity (`OK`/`INFO`/`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`/`WARN`) since it's
+  reporting directly-observed handshake/certificate facts rather than
+  signature matches, so severity maps straight across at CERTAIN
+  confidence. `OK` (passed) and `WARN` (tool caveat) are dropped; `INFO` is
+  also dropped by default — measured against a live test server, including
+  every `INFO` row would turn ~15 real findings into ~170 of pure
+  configuration metadata (cipher lists, cert serial numbers, …), drowning
+  the signal.
+- ✅ **subfinder** shipped. `adapters/subfinder_adapter.py` — passive
+  subdomain discovery (public sources only, no packets to the target), one
+  informational finding per discovered host. Its discoveries feed
+  `ScanContext.discovered_hosts`, a new chain input `HttpxAdapter.run()`
+  also walks (alongside nmap's `open_ports`) to probe `http://`/`https://`
+  each one, over the same stdin multi-target call — so `subfinder,httpx`
+  together answer "what subdomains exist, and which are actually live,"
+  not just the one seed URL. `_TOOL_EXECUTION_PRIORITY` now runs nmap and
+  subfinder (neither depends on the other) before httpx, same ordering
+  guarantee as nmap already had.
+- ✅ **Full data-chaining** — shipped. `scanner.py`'s tool loop now:
+  1. Runs `nmap` and `httpx` **first**, in that order, regardless of what
+     order `--tools`/`"all"` happened to list them in (`_TOOL_EXECUTION_PRIORITY`)
+     — the whole chain only works if the discovery data exists before the
+     tools that consume it run.
+  2. Seeds `ctx.open_ports` from nmap's *own* findings as they come back
+     (not only from the built-in `port_scan` module, which is all the old
+     code checked — that was a real gap: it meant chaining silently never
+     fired when nmap was actually installed and ran, only in the fallback
+     case).
+  3. `HttpxAdapter.run()` is now overridden: when `ctx.open_ports` has
+     entries for the target's host, it probes the seed URL *and* every
+     other discovered port (`http://`/`https://` each) in one call, piped
+     to httpx over **stdin** (httpx's own multi-target idiom) instead of a
+     single `-u`. No extra ports → unchanged single-`-u` behaviour.
+  4. `nuclei`/`ffuf`/`nikto`/`testssl` (`_PER_URL_TOOLS` — the adapters that
+     test a URL's *content*, not a specific query parameter) run once per
+     distinct URL in `[seed target, *ctx.http_services]` via a new
+     `_run_adapter_per_url` helper — a fresh adapter instance per URL, so no
+     adapter's own per-run state (e.g. sqlmap's ephemeral port/credentials)
+     leaks between calls. sqlmap/interactsh stay seed-URL-only: a bare
+     discovered `host:port` has no query parameters for them to test, so
+     chaining them would just be wasted subprocess launches.
+
+  Verified against a real local network, not just unit tests: nmap found
+  real open ports on the test machine (8080, 631, …), httpx's stdin fan-out
+  confirmed which were actually live HTTP(S), and nikto then ran against
+  each of those in turn — all through the real CLI. `tests/test_data_chaining.py`
+  covers the same path hermetically (dynamic fake nmap/httpx/nuclei
+  binaries that echo back whatever target they were actually invoked
+  with, so the assertions can tell *how many* distinct URLs each adapter
+  ran against).
 
 ---
 
@@ -183,15 +286,20 @@ own quality:
 From assessing a real modern target (SPA + auth + API, on managed hosting).
 Ordered by impact; several are now *resolved by the plan above*.
 
-1. **Authenticated scanning** — ✅ *scaffolded.* `core/auth.py`
-   (`FormLoginAuthenticator`) + `Requester.set_session_recovery` give form
-   login and transparent mid-scan re-auth. Follow-ups in Phase D.
-2. **No JS/SPA rendering** — `--dynamic` is a stub. **Phase D.** Until then,
-   thin results on a client-rendered app are *not* evidence of a clean app.
+1. **Authenticated scanning** — ✅ *scaffolded, with follow-ups shipped.*
+   `core/auth.py` (`FormLoginAuthenticator`) + `Requester.set_session_recovery`
+   give form login, CSRF-token harvesting, multi-step/MFA (incl. live TOTP),
+   and transparent mid-scan re-auth (replaying every configured step with a
+   fresh code). OAuth2/OIDC and a role-matrix comparison remain — see Phase D.
+2. **No JS/SPA rendering** — ✅ *resolved by Phase D* (`DomWatcher`,
+   `--dynamic`). A thin static-only result is still possible if `--dynamic`
+   is left off, but it's no longer the only option.
 3. **No API / JSON-body testing** — most modules fuzz only query params and
    HTML form fields. **Phase D.**
-4. **No OAST** — blind SSRF/SQLi/RCE/XXE undetectable. **Resolved by Phase C**
-   (interactsh).
+4. **No OAST** — blind SSRF/SQLi/RCE/XXE undetectable. **✅ Blind SSRF
+   resolved by Phase C** (`interactsh` adapter, GET query parameters). Blind
+   SQLi/RCE/XXE still have no OOB confirmation path — same adapter's
+   machinery, different payload shapes, left for a follow-up.
 5. **Missing vuln classes** — command injection, open redirect, XXE, CORS,
    file-upload. Largely **covered by Phase B** (nuclei templates); native
    modules optional afterwards.
@@ -239,10 +347,17 @@ Ordered by impact; several are now *resolved by the plan above*.
 - Statistical response-anomaly detection.
 - Host-scoped TCP port scan + explicit CIDR subnet sweep (opt-in, capped,
   parallelised).
-- Form-login authentication scaffold + mid-scan session recovery.
-- Tool orchestration (Phases A + B): `ToolAdapter` framework, `--tools` /
-  `--no-tools` / `--tool-timeout` / `--list-tools`, and nuclei, nmap (with
-  built-in port-scan fallback), httpx and ffuf adapters.
+- Form-login authentication: CSRF-token harvesting, multi-step/MFA (incl.
+  live RFC 6238 TOTP), + mid-scan session recovery that replays every step.
+- Tool orchestration (Phases A + B + C + E, complete): `ToolAdapter`
+  framework, `--tools` / `--no-tools` / `--tool-timeout` / `--list-tools`, 9
+  adapters (nuclei, nmap, httpx, ffuf, sqlmap, interactsh, nikto,
+  testssl.sh, subfinder), and full data-chaining across them (nmap's ports
+  + subfinder's subdomains → httpx → every live URL templated by the
+  content/vuln scanners) — a real recon→exploit pipeline, not 9 adapters
+  each testing one URL in isolation.
+- Dynamic (Playwright) crawling (`core/dom_watcher.py`, `--dynamic` /
+  `crawler.dynamic_crawl`), additive to the static crawl (Phase D).
 
 ---
 
@@ -264,3 +379,45 @@ Ordered by impact; several are now *resolved by the plan above*.
   (`--tools`, `--no-tools`, `--tool-timeout`, `--list-tools`); nuclei, nmap and
   httpx adapters; ffuf adapter pulled forward from Phase E; `adapters/` now
   packaged and type-checked. Next: Phase C (sqlmap REST API, interactsh OAST).
+- 2026-10-11 — Phase C sqlmap adapter shipped: REST-API-driven (`sqlmapapi
+  -s`), localhost-only with random per-run port/credentials, confirmed
+  injections mapped from the `TECHNIQUES` content type.
+- 2026-10-11 — Phase C interactsh adapter shipped: one correlation domain per
+  query parameter, DNS/HTTP callback attributed back to its parameter,
+  confirming blind SSRF the reflection-based `ssrf_check` can't see. Phase C
+  complete (sqlmap + interactsh).
+- 2026-10-11 — Phase D JS/SPA rendering shipped: `core/dom_watcher.py`'s
+  `DomWatcher` (headless Chromium, same `HTMLParser`/`CrawledEndpoint` model
+  as the static crawler) replaces the `--dynamic` stub, wired additively
+  into `scanner.py` Phase 2. CI now installs Chromium for real (unmocked)
+  browser tests.
+- 2026-10-12 — Phase D authenticated-scanning follow-ups (partial) shipped:
+  `core/auth.py` now harvests hidden fields (CSRF tokens) from the login/MFA
+  page by default before submitting, and supports an optional second
+  (MFA) step with live RFC 6238 TOTP generation — re-authentication replays
+  both steps with a fresh code each time. New CLI flags: `--mfa-url`,
+  `--mfa-data`, `--mfa-method`, `--mfa-success-text`, `--mfa-failure-text`,
+  `--no-csrf-harvest`. OAuth2/OIDC and the role-matrix comparison are still
+  open.
+- 2026-10-12 — Phase E nikto + testssl.sh adapters shipped: both override
+  `run()` for file-based (not stdout) JSON output, same argv-safety/timeout
+  shape as every other adapter. nikto gets no severity from the tool at
+  all (heuristic candidates → INFORMATIONAL/TENTATIVE, CVE-cited → MEDIUM/
+  FIRM); testssl.sh gets a real one (direct handshake/cert observations →
+  CERTAIN, OK/WARN/INFO dropped to avoid ~170 rows of pure metadata
+  drowning ~15 real findings — measured against a live test server). 8/8
+  adapters now installed and registered.
+- 2026-10-12 — Phase E full data-chaining shipped: nmap/httpx forced to run
+  first regardless of `--tools` order; `ctx.open_ports` now seeded from
+  nmap's own findings (not only the `port_scan` fallback — this was a real
+  gap, chaining silently never fired with nmap actually installed);
+  `HttpxAdapter.run()` probes every nmap-discovered port via stdin
+  multi-target; `nuclei`/`ffuf`/`nikto`/`testssl` now run once per distinct
+  URL `httpx` confirms live, via a fresh adapter instance per URL. Verified
+  against a real local network (nmap → httpx → nikto chained for real, not
+  mocked) plus a hermetic integration suite.
+- 2026-10-12 — Phase E subfinder adapter shipped, closing out Phase E:
+  `ScanContext.discovered_hosts` is the new chain input (subfinder's finds),
+  `HttpxAdapter` probes those hosts alongside nmap's ports, and
+  `_TOOL_EXECUTION_PRIORITY` runs nmap/subfinder before httpx. 9/9 adapters
+  now installed and registered.

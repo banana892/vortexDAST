@@ -17,6 +17,16 @@ Invocation
 per probed endpoint on stdout (JSON-Lines), reusing the shared
 :func:`core.orchestrator.parse_jsonl` helper.
 
+When ``ScanContext.open_ports`` already has entries for the target's host, or
+``ScanContext.discovered_hosts`` has subdomains (nmap/subfinder ran first —
+the orchestrator guarantees that ordering), :meth:`run` is overridden to also
+probe every one of those: ``http://host[:port]`` and ``https://host[:port]``
+are piped to httpx over **stdin** instead of a single ``-u`` argument
+(httpx's own idiom for multi-target input), so an open port nmap found, or a
+subdomain subfinder found, that never would have been in the seed URL still
+gets checked for a live web service. With nothing extra to add, behaviour is
+unchanged from before — a single ``-u <target>`` call.
+
 Licence note
 ------------
 httpx (ProjectDiscovery) is MIT-licensed and invoked as a *separate program*,
@@ -32,15 +42,24 @@ to test.**
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from core.orchestrator import (
     ScanContext,
     ToolAdapter,
     parse_jsonl,
+    run_command,
     severity_from_label,
 )
 from modules.base import Confidence, Finding
+
+logger = logging.getLogger(__name__)
+
+#: Hard cap on how many extra ports one host's nmap results can add — bounds
+#: the fan-out if a host happens to have many open ports.
+_MAX_EXTRA_PORTS = 20
 
 
 class HttpxAdapter(ToolAdapter):
@@ -73,6 +92,78 @@ class HttpxAdapter(ToolAdapter):
             "-silent",
             "-disable-update-check",
         ]
+
+    def run(self, target: str, ctx: ScanContext) -> List[Finding]:
+        """
+        Probe ``target``, plus — when nmap already found other open ports on
+        its host, and/or subfinder already found other hosts under its
+        domain — each of those too, via stdin. Falls straight through to the
+        base class's single-target ``-u`` behaviour when there's nothing
+        extra to add.
+        """
+        extra_urls = [
+            *self._extra_candidate_urls(target, ctx),
+            *self._extra_subdomain_urls(target, ctx),
+        ]
+        if not extra_urls:
+            return super().run(target, ctx)
+
+        if not self.is_available():
+            return self._fallback(target, ctx)
+
+        timeout = min(self.default_timeout, ctx.tool_timeout)
+        argv = [self.binary, "-json", "-silent", "-disable-update-check"]
+        stdin_targets = "\n".join([target, *extra_urls]) + "\n"
+        logger.debug(
+            "Running %s on %d target(s) via stdin: %s",
+            self.name, 1 + len(extra_urls), " ".join(argv),
+        )
+        result = run_command(argv, timeout=timeout, input_text=stdin_targets)
+
+        if result.not_found:
+            return self._fallback(target, ctx)
+        if result.timed_out:
+            logger.warning("Adapter '%s' timed out; returning partial output.", self.name)
+        elif result.returncode != 0:
+            logger.warning(
+                "Adapter '%s' exited %d: %s",
+                self.name, result.returncode, result.stderr.strip()[:200],
+            )
+
+        try:
+            return self.parse(result.stdout)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.error("Adapter '%s' failed to parse output: %s", self.name, exc)
+            return []
+
+    @staticmethod
+    def _extra_candidate_urls(target: str, ctx: ScanContext) -> List[str]:
+        """``http(s)://host:port`` for every nmap-discovered port on target's host."""
+        parts = urlsplit(target)
+        host = parts.hostname
+        if not host:
+            return []
+
+        ports = ctx.open_ports.get(host, [])
+        urls: List[str] = []
+        for port in ports[:_MAX_EXTRA_PORTS]:
+            if port == parts.port:
+                continue  # already covered by `target` itself
+            urls.append(f"http://{host}:{port}")
+            urls.append(f"https://{host}:{port}")
+        return urls
+
+    @staticmethod
+    def _extra_subdomain_urls(target: str, ctx: ScanContext) -> List[str]:
+        """``http(s)://host`` for every subfinder-discovered host, bar the target's own."""
+        own_host = urlsplit(target).hostname or ""
+        urls: List[str] = []
+        for host in ctx.discovered_hosts[:_MAX_EXTRA_PORTS]:
+            if host.lower() == own_host.lower():
+                continue  # already covered by `target` itself
+            urls.append(f"http://{host}")
+            urls.append(f"https://{host}")
+        return urls
 
     def parse(self, raw_output: str) -> List[Finding]:
         """Translate httpx JSONL into informational :class:`Finding` objects."""

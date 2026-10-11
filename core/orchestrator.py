@@ -76,6 +76,9 @@ class ScanContext:
     http_services: List[str] = field(default_factory=list)
     """Live HTTP(S) base URLs discovered (populated by httpx)."""
 
+    discovered_hosts: List[str] = field(default_factory=list)
+    """Subdomains/hostnames discovered passively (populated by subfinder)."""
+
     #: Hard per-subprocess timeout, seconds. Individual adapters may lower this
     #: via their own ``default_timeout`` but must not exceed the run budget.
     tool_timeout: float = 600.0
