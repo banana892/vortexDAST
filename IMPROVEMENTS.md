@@ -217,9 +217,12 @@ Ordered by impact; several are now *resolved by the plan above*.
   169.254.169.254 metadata endpoint), multicast or reserved address, and never
   follows redirects. Internal targets require an explicit opt-in
   (`--allow-private-webhook` / `VORTEX_ALLOW_PRIVATE_WEBHOOK=1`).
-- **Known false positives** — Firebase NoSQL pattern includes the broad string
-  `"Database Error"` (collides with SQL errors); IDOR heuristic flags public
-  GET params.
+- **Known false positives** — ✅ *fixed.* Dropped the broad `"Database Error"`
+  pattern from the Firebase NoSQL signatures (it collided with ordinary SQL
+  error pages). The IDOR heuristic now runs only when a session is configured
+  (no auth boundary = no IDOR) and only swaps params whose name looks like an
+  object reference, so public pages and numeric navigation params (`page`,
+  `offset`, …) are no longer flagged.
 - **Edge-WAF-aware backoff** — beyond basic 429-halving, detect CDN/WAF
   throttling (e.g. Vercel/Cloudflare) and slow/pause gracefully.
 
