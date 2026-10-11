@@ -5,8 +5,11 @@ Post a scan summary to a webhook (generic JSON or Slack incoming webhook).
 
 from __future__ import annotations
 
+import ipaddress
 import logging
-from typing import Any, Dict, List, Optional
+import os
+import socket
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlsplit
 
 import requests
@@ -67,11 +70,89 @@ def build_payload(
     }
 
 
-def send_webhook(url: str, payload: Dict[str, Any]) -> bool:
-    """POST the payload; never raises. Logs only the host since webhook URLs embed secrets."""
-    host = urlsplit(url).netloc or "webhook"
+def _private_webhooks_allowed() -> bool:
+    """Whether posting to internal/non-public addresses is explicitly opted in."""
+    return (os.environ.get("VORTEX_ALLOW_PRIVATE_WEBHOOK") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+_IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+
+
+def _is_blocked_ip(ip: _IPAddress) -> bool:
+    """True if ``ip`` is an internal / non-routable address a webhook must not reach."""
+    # Unwrap IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254) so the embedded v4
+    # address is judged on its own merits, not as a "global" v6 address.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _webhook_target_is_safe(url: str) -> Tuple[bool, str]:
+    """
+    Resolve ``url``'s host and reject it if any resolved address is internal.
+
+    Guards against SSRF: a caller-supplied webhook/callback URL must not be used
+    to make the scanner POST to loopback, RFC1918, link-local (incl. the cloud
+    metadata endpoint 169.254.169.254), multicast or otherwise non-public
+    addresses. Fails closed on an unresolvable host.
+    """
+    host = urlsplit(url).hostname
+    if not host:
+        return False, "no host in URL"
     try:
-        resp = requests.post(url, json=payload, timeout=_TIMEOUT_S)
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False, "host did not resolve"
+
+    for info in infos:
+        addr = str(info[4][0]).split("%", 1)[0]  # drop any IPv6 zone id
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return False, "host resolved to an unparseable address"
+        if _is_blocked_ip(ip):
+            return False, "host resolves to a non-public address"
+    return True, ""
+
+
+def send_webhook(
+    url: str,
+    payload: Dict[str, Any],
+    *,
+    allow_private: Optional[bool] = None,
+) -> bool:
+    """POST the payload; never raises. Logs only the host since webhook URLs embed secrets.
+
+    By default the destination is blocked when it resolves to an internal /
+    non-public address (SSRF guard). Pass ``allow_private=True`` (or set
+    ``VORTEX_ALLOW_PRIVATE_WEBHOOK=1``) to permit internal targets for local
+    receivers you control. Redirects are never followed, so a cleared external
+    host cannot bounce the POST to an internal one.
+    """
+    host = urlsplit(url).netloc or "webhook"
+    if allow_private is None:
+        allow_private = _private_webhooks_allowed()
+    if not allow_private:
+        safe, reason = _webhook_target_is_safe(url)
+        if not safe:
+            logger.warning(
+                "Webhook to %s blocked: %s. Set VORTEX_ALLOW_PRIVATE_WEBHOOK=1 "
+                "to allow internal targets.",
+                host, reason,
+            )
+            return False
+    try:
+        resp = requests.post(url, json=payload, timeout=_TIMEOUT_S, allow_redirects=False)
     except requests.RequestException as exc:
         logger.warning("Webhook to %s failed: %s", host, type(exc).__name__)
         return False

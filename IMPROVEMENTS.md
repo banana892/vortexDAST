@@ -211,8 +211,12 @@ Ordered by impact; several are now *resolved by the plan above*.
   no `VORTEX_API_KEY` configured, protected endpoints return HTTP 503.
   Unauthenticated operation is an explicit opt-in (`--allow-unauthenticated` /
   `VORTEX_ALLOW_UNAUTHENTICATED=1`); `/health` stays public throughout.
-- **Webhook SSRF** — `callback_url` validates scheme only; resolve-and-block
-  RFC1918/link-local before posting.
+- **Webhook SSRF** — ✅ *fixed.* `send_webhook` (the choke point for the API
+  `callback_url` and the CLI `--webhook`) now resolves the destination host and
+  blocks any that maps to a loopback, RFC1918, link-local (incl. the
+  169.254.169.254 metadata endpoint), multicast or reserved address, and never
+  follows redirects. Internal targets require an explicit opt-in
+  (`--allow-private-webhook` / `VORTEX_ALLOW_PRIVATE_WEBHOOK=1`).
 - **Known false positives** — Firebase NoSQL pattern includes the broad string
   `"Database Error"` (collides with SQL errors); IDOR heuristic flags public
   GET params.

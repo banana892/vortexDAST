@@ -976,6 +976,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Webhook body: 'json' (structured summary) or 'slack' (incoming-webhook text). Default: json.",
     )
     parser.add_argument(
+        "--allow-private-webhook",
+        action="store_true",
+        help=(
+            "Permit --webhook URLs that resolve to internal/non-public addresses "
+            "(loopback, RFC1918, link-local). Blocked by default to prevent SSRF; "
+            "enable only for a local receiver you control."
+        ),
+    )
+    parser.add_argument(
         "--disable-anomaly-detection",
         action="store_true",
         default=False,
@@ -1818,6 +1827,7 @@ def run_scan(args: argparse.Namespace) -> int:
         send_webhook(
             webhook,
             build_payload(kept_findings, args.target, args.webhook_format, exit_code, scan_meta),
+            allow_private=getattr(args, "allow_private_webhook", False),
         )
 
     _export_issues(args, kept_findings, console, theme)
