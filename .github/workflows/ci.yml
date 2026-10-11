@@ -18,7 +18,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install (with dev extras)
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,api]"
 
       - name: Dependency audit (pip-audit)
         run: |
