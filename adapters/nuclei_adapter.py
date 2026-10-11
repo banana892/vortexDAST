@@ -64,7 +64,9 @@ class NucleiAdapter(ToolAdapter):
         ``-jsonl`` gives one JSON object per line on stdout; ``-silent``
         suppresses the banner/progress chatter so stdout is pure JSONL;
         ``-disable-update-check`` keeps the run offline-friendly and
-        deterministic for CI.
+        deterministic for CI. ``-severity`` restricts the run to
+        critical/high/medium templates, since the full corpus can take tens
+        of minutes against a single target.
         """
         return [
             self.binary,
@@ -73,6 +75,8 @@ class NucleiAdapter(ToolAdapter):
             "-jsonl",
             "-silent",
             "-disable-update-check",
+            "-severity",
+            "critical,high,medium",
         ]
 
     def parse(self, raw_output: str) -> List[Finding]:
