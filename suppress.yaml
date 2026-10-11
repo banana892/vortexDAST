@@ -1,0 +1,5 @@
+# VortexDAST suppression rules — pass with: vortex -u URL --suppress suppress.yaml
+suppress:
+  - title: "VMware ESXi SLP - Heap Overflow DoS"
+    url: "coding\\.ziuro\\.com"
+    reason: "nuclei TCP template (CVE-2019-5544) false-matches on Vercel edge infra, not an actual ESXi host"
