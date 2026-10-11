@@ -21,7 +21,9 @@ testing *without* a full dual-mode crawler refactor:
     ``order``, …), the reference is incremented/decremented and re-requested.
     A 200 response of comparable size but *different* content suggests another
     user's object is reachable. Reported as ``tentative`` (manual confirmation
-    required) because a DAST cannot know resource ownership.
+    required) because a DAST cannot know resource ownership. Runs **only when a
+    session is configured** — without an authorization boundary to cross, a
+    differing public record is expected content, not IDOR.
 
 False-Positive Reduction
 ------------------------
@@ -29,6 +31,10 @@ False-Positive Reduction
     genuinely public pages are not flagged.
 *   A login / access-denied body (or a redirect to one) is treated as correctly
     protected.
+*   Part 2 (IDOR) runs only when auth is configured, and only swaps params
+    whose name looks like an object reference (curated list or id-like suffix),
+    so numeric navigation params (``page``, ``offset``, ``year``, …) are not
+    probed.
 *   IDOR findings are ``tentative`` and gated on comparable-size, differing-but
     -valid-looking responses.
 
@@ -64,6 +70,9 @@ _IDOR_MIN_DIFF = 0.10
 # …while staying within this size band of the baseline (so it still looks like a record).
 _IDOR_MIN_SIZE_BAND = 0.5
 _IDOR_MAX_SIZE_BAND = 2.0
+# Numeric params with an id-like name are treated as object references even when
+# the exact name is not in the curated list (covers custom *_id / *Id / *_ref).
+_ID_NAME_SUFFIXES = ("id", "_id", "uid", "uuid", "ref", "_ref", "key")
 
 # Unauthenticated access to a protected resource: network, low complexity, no
 # privileges/UI; confidentiality High (sensitive page exposed), integrity Low.
@@ -117,12 +126,19 @@ class AccessControlCheckModule(BaseScannerModule):
         if self._auth_configured:
             findings.extend(self._check_unauth_access(endpoint.url))
 
-        if endpoint.query_params:
-            findings.extend(self._check_idor(endpoint.url, endpoint.query_params))
-        for link in endpoint.links:
-            link_params = getattr(link, "query_params", None)
-            if link_params:
-                findings.extend(self._check_idor(link.url, link_params))
+        # IDOR is a *horizontal access-control* flaw: it only has meaning when
+        # there is a session whose authorization boundary a swapped reference
+        # could cross. Without authentication every response is public, so a
+        # differing record for a different id is expected content, not a
+        # vulnerability — running the swap there only produces false positives
+        # on public catalogues and pagination. Gate it on auth, like Part 1.
+        if self._auth_configured:
+            if endpoint.query_params:
+                findings.extend(self._check_idor(endpoint.url, endpoint.query_params))
+            for link in endpoint.links:
+                link_params = getattr(link, "query_params", None)
+                if link_params:
+                    findings.extend(self._check_idor(link.url, link_params))
 
         return findings
 
@@ -331,10 +347,13 @@ class AccessControlCheckModule(BaseScannerModule):
     def _is_object_ref(self, param: str, value: str) -> bool:
         if not value.isdigit():
             return False
-        if param.lower() in self._idor_param_names:
+        name = param.lower()
+        if name in self._idor_param_names:
             return True
-        # Any purely-numeric parameter value is a plausible object reference.
-        return True
+        # Fall back to id-like naming only. A bare numeric value is not enough:
+        # navigational/dimension params (page, offset, limit, year, width, …)
+        # are numeric too, and swapping them is not an object-reference test.
+        return name.endswith(_ID_NAME_SUFFIXES)
 
     def _looks_like_login(self, body: str) -> bool:
         body_lower = body.lower()

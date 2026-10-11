@@ -20,7 +20,7 @@ rich==14.3.4
 # ─────────────────────────────────────────────────────────────────────────────
 # Dev / Testing
 # ─────────────────────────────────────────────────────────────────────────────
-pytest==8.4.2
+pytest==9.0.3
 pytest-cov==5.0.0    # Test coverage reports
 jsonschema==4.26.0   # SARIF report schema validation in tests
 mypy==1.20.2         # Type checking

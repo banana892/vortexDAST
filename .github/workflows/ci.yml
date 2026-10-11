@@ -18,12 +18,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install (with dev extras)
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,api]"
 
       - name: Dependency audit (pip-audit)
         run: |
           pip install pip-audit
-          pip-audit --strict --desc
+          pip-audit -r requirements.txt --strict --desc
 
       - name: Type check (mypy)
         run: mypy

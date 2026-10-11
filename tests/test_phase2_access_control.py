@@ -210,7 +210,7 @@ class TestUnauthAccess:
 
 class TestIDOR:
     def test_idor_swap_reported(self) -> None:
-        shared = _requester()  # no auth needed for IDOR; path non-sensitive
+        shared = _requester(cookies={"sid": "x"})  # IDOR needs a session
         base = "Invoice #5 total $100 " + "a" * 100
         other = "Invoice #6 total $250 " + "b" * 100
 
@@ -229,15 +229,31 @@ class TestIDOR:
         assert idor[0].parameter == "id"
         assert "IDOR" in idor[0].title
 
+    def test_idor_not_run_without_auth(self) -> None:
+        # Unauthenticated: a differing public record must NOT be flagged (no
+        # access-control boundary exists to violate).
+        shared = _requester()  # no cookies/auth
+        base = "Invoice #5 total $100 " + "a" * 100
+        other = "Invoice #6 total $250 " + "b" * 100
+
+        def fake_get(url: str, *a, **k):
+            return (_resp(other if "id=6" in url else base, 200), None)
+
+        shared.get.side_effect = fake_get
+        mod = AccessControlCheckModule(shared)
+        assert mod._auth_configured is False
+        findings = mod.run(_endpoint("https://t.com/view", {"id": ["5"]}))
+        assert [f for f in findings if f.confidence == Confidence.TENTATIVE] == []
+
     def test_idor_identical_response_not_reported(self) -> None:
-        shared = _requester()
+        shared = _requester(cookies={"sid": "x"})
         shared.get.return_value = (_resp("same record for every id", 200), None)
         mod = AccessControlCheckModule(shared)
         findings = mod.run(_endpoint("https://t.com/view", {"id": ["5"]}))
         assert [f for f in findings if f.confidence == Confidence.TENTATIVE] == []
 
     def test_idor_error_on_swap_not_reported(self) -> None:
-        shared = _requester()
+        shared = _requester(cookies={"sid": "x"})
 
         def fake_get(url: str, *a, **k):
             if "id=5" in url:
@@ -250,8 +266,23 @@ class TestIDOR:
         assert [f for f in findings if f.confidence == Confidence.TENTATIVE] == []
 
     def test_non_numeric_param_skipped(self) -> None:
-        shared = _requester()
+        shared = _requester(cookies={"sid": "x"})
         shared.get.return_value = (_resp("x", 200), None)
         mod = AccessControlCheckModule(shared)
         findings = mod.run(_endpoint("https://t.com/view", {"name": ["bob"]}))
         assert findings == []
+
+    def test_numeric_navigation_param_not_treated_as_object_ref(self) -> None:
+        # A numeric but navigational param (?page=2) must not be swap-tested,
+        # even authenticated, so public pagination is not flagged as IDOR.
+        shared = _requester(cookies={"sid": "x"})
+        base = "page one " + "a" * 100
+        other = "page two " + "b" * 100
+
+        def fake_get(url: str, *a, **k):
+            return (_resp(other if "page=2" in url else base, 200), None)
+
+        shared.get.side_effect = fake_get
+        mod = AccessControlCheckModule(shared)
+        findings = mod.run(_endpoint("https://t.com/blog", {"page": ["1"]}))
+        assert [f for f in findings if f.confidence == Confidence.TENTATIVE] == []

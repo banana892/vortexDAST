@@ -1,203 +1,268 @@
-# Automated Web Vulnerability Scanner (Lightweight DAST Framework)
+# VortexDAST
 
-## 1. Project Overview & Objective
-This project is an extensible, lightweight Python-based Dynamic Application Security Testing (DAST) scanner. It maps web application attack surfaces, extracts interactive injection points (forms, parameters, endpoints), fuzzes inputs with benign heuristic probes, and detects common OWASP Top 10 vulnerabilities (including SQL Injection, Reflected Cross-Site Scripting, Missing Security Headers, and SSRF).
+**A web-application security scanner with an orchestration layer.**
 
-Headless browser automation via Playwright ensures coverage of modern Single Page Applications (SPAs) and dynamic DOM manipulations alongside traditional static HTML crawling.
+VortexDAST crawls a target web app, fuzzes its inputs with benign probes, and
+reports findings (XSS, SQLi, SSRF, security-header and transport issues, and
+more) with CVSS scores, severity, confidence and remediation — as terminal
+output or JSON / HTML / SARIF.
+
+Its direction is to become an **orchestrator**: VortexDAST does its own
+web-app testing well *and* drives best-of-breed open-source tools
+(nmap, nuclei, httpx, sqlmap, …) when they are installed, unifying everything
+into one report. One command, one report — powered by the right specialist for
+each job, with a built-in fallback when a tool is absent.
+
+> **Only scan targets you own or are explicitly authorised to test.**
 
 ---
 
-## 2. Architecture & Workflow
+## Status at a glance
 
-```text
-                      [ Target URL / Scope ]
-                                │
-                                ▼
-    ┌──────────────────────────────────────────────────────┐
-    │                 1. CRAWLER & SPIDER                  │
-    │  - Static HTTP extraction (BeautifulSoup)            │
-    │  - Dynamic DOM rendering & AJAX spider (Playwright)  │
-    │  - Scope enforcement (Domain & Subpath whitelist)    │
-    └──────────────────────────┬───────────────────────────┘
-                               │
-                               ▼
-    ┌──────────────────────────────────────────────────────┐
-    │             2. ATTACK SURFACE EXTRACTOR              │
-    │  - Discovered URLs with Query Parameters (?p=...)    │
-    │  - Form & Input Parsers (GET/POST, action, fields)   │
-    │  - HTTP Headers & Cookie Metadata                    │
-    └──────────────────────────┬───────────────────────────┘
-                               │
-                               ▼
-    ┌──────────────────────────────────────────────────────┐
-    │             3. HEURISTIC FUZZING ENGINE              │
-    │  - Modular vulnerability probes (benign heuristics)  │
-    │  - Canary injection & response diffing               │
-    │  - Error pattern signatures & response timing        │
-    └──────────────┬───────────┬───────────┬───────────────┘
-                   │           │           │
-          ┌────────┴───┐ ┌─────┴─────┐ ┌───┴──────────┐
-          │  modules/  │ │ modules/  │ │   modules/   │
-          │  sqli.py   │ │  xss.py   │ │  headers.py  │ ...
-          └────────────┘ └───────────┘ └──────────────┘
-                               │
-                               ▼
-    ┌──────────────────────────────────────────────────────┐
-    │               4. RESPONSE & DOM ANALYZER             │
-    │  - RegEx Signature Matching (DBMS error signatures)  │
-    │  - Reflection & Context Breakout Verification        │
-    │  - Missing Security Headers & Cookie Flags Audit     │
-    └──────────────────────────┬───────────────────────────┘
-                               │
-                               ▼
-    ┌──────────────────────────────────────────────────────┐
-    │             5. REPORT GENERATION ENGINE              │
-    │  - Structured JSON for CI/CD integration             │
-    │  - Human-readable Markdown & HTML summaries          │
-    │  - Remediation guidance & CVSS scoring breakdown     │
-    └──────────────────────────────────────────────────────┘
+VortexDAST is an actively evolving project. This table is the honest line
+between what runs today and what is planned — see
+[`IMPROVEMENTS.md`](IMPROVEMENTS.md) for the full roadmap.
 
-## 3. CLI Usage
+| Area | State |
+|------|-------|
+| Static crawl + 13 scanner modules (XSS, SQLi, NoSQLi, SSTI, traversal, SSRF, CSRF, access-control, headers, transport, dir/param/tech recon) | ✅ Shipped |
+| Reporting: terminal, JSON, HTML, Markdown, SARIF 2.1.0; CVSS v3.1 | ✅ Shipped |
+| REST API mode, CI/CD exit codes, webhook notifications | ✅ Shipped |
+| Host-scoped TCP port scan + explicit CIDR subnet sweep | ✅ Shipped (opt-in) |
+| Form-login authentication + mid-scan session recovery | ✅ Shipped (scaffold) |
+| **Tool orchestration** — framework + nuclei / nmap / httpx / ffuf adapters (`--tools`) | ✅ Shipped (opt-in) |
+| sqlmap / interactsh adapters (Phase C) | 🚧 Planned |
+| **JavaScript / SPA rendering** (`--dynamic` Playwright crawl) | 🚧 Planned — currently a stub |
+| **Out-of-band (OAST)** testing for blind vulns | 🚧 Planned (via interactsh) |
+| **API / OpenAPI import + JSON-body fuzzing** | 🚧 Planned |
 
-```text
-usage: vortexdast [-h] [--list-modules] [--target URL] [--max-depth N]
-                  [--modules MODULES] [--recon-only] [--rate-limit RPS]
-                  [--threads N] [--concurrency N] [--timeout SECS]
-                  [--max-endpoints N] [--insecure] [--dynamic] [--config PATH]
-                  [--proxy URL] [--cookie STRING] [--header HEADER]
-                  [--auth-user USER] [--auth-pass PASS] [--min-severity LEVEL]
-                  [--min-confidence LEVEL] [--suppress FILE] [--output FILE]
-                  [--verbose]
+---
 
-VortexDAST — Lightweight Dynamic Application Security Testing Framework.
-Crawls a target web application and runs configurable vulnerability modules.
+## Install
 
-options:
-  -h, --help            show this help message and exit
-  --list-modules        Print a Rich table of all registered scanner modules
-                        with their IDs and descriptions, then exit with code
-                        0.
-  --target, -u URL      Target base URL to scan (required unless --list-
-                        modules). Example: https://target.example.com
-  --max-depth N         Crawler BFS recursion depth (default: value from
-                        config.yaml, usually 3).
-  --modules, -m MODULES
-                        Comma-separated list of modules to run, or "all". Run
-                        --list-modules to see all available IDs. Default: all
-  --recon-only          Run only reconnaissance modules (tech_detect,
-                        dir_fuzzer, param_fuzzer). Overrides --modules.
-  --rate-limit RPS      Override requests-per-second rate limit (0 =
-                        disabled). Default from config.yaml (usually 5). Safe
-                        to raise to 20.0 for authorised remote targets.
-  --threads, -t N       Number of concurrent worker threads used by scanner
-                        modules. Higher values reduce wall-clock time for
-                        probe-heavy modules (XSS, SQLi, SSRF). Default: 10.
-                        Recommended range: 5–20. See also: --concurrency
-                        (alias that takes precedence).
-  --concurrency N       Number of concurrent worker threads (alias for
-                        --threads; takes precedence when both are specified).
-                        Recommended range: 5–20.
-  --timeout SECS        Per-request HTTP timeout in seconds. Overrides the
-                        value in config.yaml (usually 10 s). Useful for slow
-                        targets (raise to 30) or CI speed (lower to 5).
-  --max-endpoints N     Cap the number of crawled endpoints passed to scanner
-                        modules. Useful for quick reconnaissance scans (e.g.
-                        --max-endpoints 10). Default: unlimited.
-  --insecure, -k        Disable SSL certificate verification (for self-signed
-                        certs in local labs).
-  --dynamic             Enable Playwright headless browser crawling for JS-
-                        rendered SPAs. Requires: playwright install chromium
-  --config PATH         Path to config.yaml (default:
-                        /home/naishring/VortexDAST/config.yaml).
-  --proxy URL           HTTP proxy URL (e.g. http://127.0.0.1:8080).
-  --cookie, -C STRING   Inject session cookies into every request. Format:
-                        "NAME=VALUE; NAME2=VALUE2" (same as a browser Cookie
-                        header). Example: --cookie "JSESSIONID=abc123;
-                        auth=true"
-  --header, -H HEADER   Add a custom HTTP header to every request (may be
-                        repeated). Format: "Name: Value". Example: -H
-                        "Authorization: Bearer eyJhbG..." -H "X-API-Key:
-                        secret"
-  --auth-user USER      Username for HTTP Basic / Digest authentication.
-  --auth-pass PASS      Password for HTTP Basic / Digest authentication (pair
-                        with --auth-user).
-  --min-severity LEVEL  Only report findings at or above this severity
-                        (critical, high, medium, low, informational).
-  --min-confidence LEVEL
-                        Only report findings at or above this confidence
-                        (certain, firm, tentative). Use 'firm' to hide
-                        heuristic hits that need manual verification.
-  --suppress FILE       YAML file of suppression rules for known false
-                        positives (see suppress.example.yaml).
-  --output, -o FILE     Output file for the scan report (.json, .sarif, .md,
-                        or .html). If omitted, terminal output only.
-  --verbose, -v         Enable verbose DEBUG logging.
-
-Examples:
-  vortex --list-modules
-  vortex -u http://testphp.vulnweb.com
-  vortex -u https://app.local -k -m xss_check,sqli_check
-  vortex -u http://target.com --max-depth 2 -o results.json
-  vortex -u http://target.com --modules all --rate-limit 20 --concurrency 20
-  vortex -u http://target.com --max-endpoints 10 --timeout 5 --rate-limit 10
-  vortexdast -u http://target.com --dynamic --verbose
+```bash
+git clone https://github.com/banana892/vortexDAST.git
+cd vortexDAST
+pip install -e .            # core scanner + CLI (`vortex` / `vortexdast`)
+pip install -e ".[api]"     # optional: REST API mode (`vortex-api`)
 ```
 
-## 4. Confidence Levels & Filtering
+Python 3.11+ recommended.
 
-Every finding carries a `confidence` alongside its severity:
+Orchestrated tools (nmap, nuclei, httpx, sqlmap, …) are **optional external
+programs**. When present on `PATH` VortexDAST uses them; when absent it falls
+back to its built-in checks or skips with a clear message. None are required to
+run a scan.
+
+---
+
+## Quick start
+
+```bash
+vortex --list-modules                        # see every scanner module
+vortex -u http://testphp.vulnweb.com         # scan a target (authorised only)
+vortex -u https://app.local -o report.html   # write an HTML report
+vortex -u https://app.local -m xss_check,sqli_check   # run specific modules
+```
+
+Authenticated scan (form login, with mid-scan session recovery):
+
+```bash
+vortex -u https://app.local/ \
+  --login-url https://app.local/login \
+  --login-data "username=admin&password=s3cret" \
+  --login-success-text "Sign out" \
+  --logged-out-text "Please log in"
+```
+
+Network recon (opt-in; scans the target host, or an explicit range):
+
+```bash
+vortex -u https://app.local --port-scan
+vortex -u https://app.local --subnet 192.168.1.0/24 --ports 22,80,443,3306
+```
+
+Orchestrate external tools (opt-in; each is optional and auto-detected):
+
+```bash
+vortex --list-tools                               # adapters + install state
+vortex -u https://app.local --tools nuclei        # add nuclei's template checks
+vortex -u https://app.local --tools nmap,httpx    # recon: ports + live HTTP
+vortex -u https://app.local --tools ffuf --ffuf-wordlist big.txt  # content discovery
+vortex -u https://app.local --tools all --tool-timeout 300
+```
+
+Tool findings are folded into the same report, dedup, filters and CI exit code
+as the built-in modules. A missing tool never fails the scan: nmap falls back to
+the built-in TCP port scan; the others are skipped with a clear note.
+
+---
+
+## Architecture
+
+```text
+                        [ Target URL / scope ]
+                                 │
+                                 ▼
+   ┌───────────────────────────────────────────────────────────┐
+   │                    VORTEXDAST CORE (today)                  │
+   │   Crawler → Attack-surface extractor → Scanner modules →    │
+   │   Response analysis → Reporter (JSON/HTML/SARIF)            │
+   └───────────────────────────────┬───────────────────────────┘
+                                    │  shared Finding model + session
+                                    ▼
+   ┌───────────────────────────────────────────────────────────┐
+   │                ORCHESTRATION LAYER (--tools)                │
+   │   ToolAdapter registry — each wraps an external specialist, │
+   │   runs it as a subprocess, parses its JSON/XML, and maps    │
+   │   the results into VortexDAST Findings:                     │
+   │                                                             │
+   │     shipped:  nmap ─ httpx ─ nuclei ─ ffuf                  │
+   │     planned:  sqlmap ─ interactsh ─ nikto ─ …               │
+   │   (detect-if-installed; built-in fallback when absent)      │
+   └───────────────────────────────────────────────────────────┘
+```
+
+- **Core** is the web-app scanner: a concurrent crawler, auto-discovered
+  scanner modules (`modules/`), a shared thread-safe `Requester`, and a
+  reporter. This is VortexDAST's own depth and is fully implemented.
+- **Orchestration layer** (`core/orchestrator.py` + `adapters/`) runs
+  `ToolAdapter`s that shell out to external tools — always as an argv list with
+  `shell=False` and a hard timeout — and translate their output into the same
+  `Finding` objects, so one scan and one report span network recon through
+  web-app testing. Adapters are auto-discovered: drop a file in `adapters/`,
+  subclass `ToolAdapter`, set `name` + `binary`. See
+  [`IMPROVEMENTS.md`](IMPROVEMENTS.md).
+
+---
+
+## CLI reference (today)
+
+```text
+usage: vortexdast [-h] [--list-modules] [--list-tools] [--list-themes]
+                  [--theme NAME] [--no-color] [--target URL] [--max-depth N]
+                  [--modules MODULES] [--recon-only]
+                  [--port-scan] [--ports LIST] [--port-scan-timeout SECS]
+                  [--subnet CIDR] [--max-subnet-hosts N] [--subnet-workers N]
+                  [--tools LIST] [--no-tools] [--tool-timeout SECS]
+                  [--ffuf-wordlist FILE]
+                  [--rate-limit RPS] [--threads N] [--concurrency N]
+                  [--timeout SECS] [--max-endpoints N] [--insecure]
+                  [--dynamic] [--config PATH] [--proxy URL] [--cookie STRING]
+                  [--header HEADER] [--auth-user USER] [--auth-pass PASS]
+                  [--login-url URL] [--login-data FIELDS] [--login-method M]
+                  [--login-success-text TEXT] [--login-failure-text TEXT]
+                  [--logged-out-text TEXT] [--min-severity LEVEL]
+                  [--min-confidence LEVEL] [--suppress FILE] [--output FILE]
+                  [--verbose]
+```
+
+Key flag groups (run `vortex -h` for the full list):
+
+- **Scope / crawl:** `--target/-u`, `--max-depth`, `--max-endpoints`, `--config`
+- **Modules:** `--modules/-m` (`all` or a comma list), `--recon-only`,
+  `--list-modules`
+- **Auth:** `--cookie`, `--header`, `--auth-user/--auth-pass` (Basic/Digest),
+  `--login-url` + `--login-data` (form login), `--logged-out-text` (session
+  recovery)
+- **Network recon (opt-in):** `--port-scan`, `--ports`, `--subnet`,
+  `--max-subnet-hosts`, `--subnet-workers`
+- **External tools (opt-in):** `--tools` (`all` or a comma list, e.g.
+  `nuclei,nmap,httpx,ffuf`), `--no-tools` (force built-ins only), `--tool-timeout`
+  (hard per-tool cap, default 600 s), `--ffuf-wordlist`, `--list-tools`. Tools
+  that send HTTP (ffuf) honour `--rate-limit`, `--threads`, `--cookie` and `-H`
+- **Throughput:** `--rate-limit`, `--threads/--concurrency`, `--timeout`,
+  `--proxy`, `--insecure`
+- **Output / filtering:** `--output/-o` (`.json/.sarif/.md/.html`),
+  `--min-severity`, `--min-confidence`, `--suppress`, `--verbose`
+- **Presentation:** `--theme`, `--list-themes`, `--no-color`
+
+> **Note:** `--dynamic` (Playwright SPA crawl) is a **planned stub** — it logs
+> a warning and does not yet render JavaScript. Tracked in `IMPROVEMENTS.md`.
+
+### Terminal themes
+
+Scan output is themed through semantic style tokens, so one flag recolours the
+whole UI. Default is **`minimal`** (near-monochrome; colour only for severity
+and status). Preview all palettes with `vortex --list-themes`.
+
+```text
+--theme flag  >  VORTEX_THEME env  >  config.yaml ui.theme  >  minimal
+```
+
+Available: `minimal`, `mono`, `vortex`, `neon`, `matrix`, `dracula`, `nord`,
+`solarized`, `gruvbox`. `--no-color` (or `NO_COLOR`/`VORTEX_NO_COLOR=1`) strips
+colour while keeping layout.
+
+---
+
+## Findings: severity + confidence
+
+Every finding carries a `confidence` alongside its CVSS-based severity:
 
 | Confidence | Meaning | Examples |
 |------------|---------|----------|
-| `certain`  | Directly observed | Missing security header, OS file contents returned, `.env` matched its content signature |
-| `firm`     | Strong signal absent from the baseline | New DBMS error string, unencoded XSS reflection, missing CSRF token |
-| `tentative`| Heuristic — verify manually | HTTP 500 on probe, boolean-blind length delta, SSRF timing, hidden-param length change |
+| `certain`  | Directly observed | Missing security header, file contents returned, `.env` matched |
+| `firm`     | Strong signal absent from baseline | New DBMS error, unencoded XSS reflection, missing CSRF token |
+| `tentative`| Heuristic — verify manually | HTTP 500 on probe, boolean-blind length delta, SSRF timing |
 
-Findings removed by `--min-severity`, `--min-confidence`, or `--suppress` rules don't appear in reports
-and don't count toward exit code `2`. Run with `-v` to see each filtered finding and the reason.
-See `suppress.example.yaml` for the rule format.
+Findings removed by `--min-severity`, `--min-confidence` or `--suppress` don't
+appear in reports and don't count toward exit code `2`. Run `-v` to see what was
+filtered and why. See `suppress.example.yaml` for the rule format.
 
-## 5. CI Integration (SARIF)
+---
 
-`-o report.sarif` (or `.sarif.json`) writes a SARIF 2.1.0 log. Each finding type becomes a rule
-(e.g. `dir_fuzzer/exposed-configuration-file`) whose `security-severity` is the highest CVSS score
-observed, and each result carries a stable fingerprint so alerts track across runs.
+## CI integration (SARIF)
 
-Example GitHub Actions job against a staging deployment:
+`-o report.sarif` writes a SARIF 2.1.0 log — each finding type becomes a rule
+whose `security-severity` is the highest CVSS observed, with stable fingerprints
+so alerts track across runs. VortexDAST exits **2** when a HIGH/CRITICAL finding
+survives filtering, else **0**, so a pipeline can gate on it.
 
 ```yaml
 security-scan:
   runs-on: ubuntu-latest
-  permissions:
-    security-events: write
+  permissions: { security-events: write }
   steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
       with: { python-version: "3.12" }
     - run: pip install -e .
-    - run: vortex -u "$STAGING_URL" --min-confidence firm --suppress suppress.yaml -o vortex.sarif
+    - run: vortex -u "$STAGING_URL" --min-confidence firm -o vortex.sarif
       env: { STAGING_URL: "${{ vars.STAGING_URL }}" }
-      continue-on-error: true   # exit code 2 = HIGH/CRITICAL found; let the upload still run
+      continue-on-error: true   # exit 2 = HIGH/CRITICAL found; still upload
     - uses: github/codeql-action/upload-sarif@v3
       with: { sarif_file: vortex.sarif, category: vortexdast }
 ```
 
-Only scan targets you own or are authorised to test.
+More in [`docs/CICD_INTEGRATION.md`](docs/CICD_INTEGRATION.md).
 
-## 6. Webhook Notifications
+---
 
-`--webhook URL` posts a summary when the scan finishes; `--webhook-format slack` sends a Slack
-incoming-webhook message instead of the default structured JSON.
+## Webhook notifications
 
-- Contains severity counts and up to 20 findings (title, severity, confidence, URL) — never
-  evidence or payloads, which can contain leaked secrets.
-- Sent with a separate HTTP client: the target's `--cookie`, `--header`, basic-auth, and
-  `--proxy` settings are not applied to it.
-- A failed post logs a warning (host only — webhook URLs usually embed a token) and does not
-  change the exit code.
+`--webhook URL` posts a summary when a scan finishes; `--webhook-format slack`
+sends a Slack message. It carries severity counts and up to 20 findings (title,
+severity, confidence, URL) — never evidence or payloads — and is sent with a
+separate HTTP client (scan auth/proxy are not applied to it).
 
-```bash
-vortex -u https://staging.example.com --min-confidence firm \
-  --webhook "$SLACK_WEBHOOK_URL" --webhook-format slack
-```
+---
 
+## Documentation
+
+- [`IMPROVEMENTS.md`](IMPROVEMENTS.md) — implementation roadmap (the orchestrator plan)
+- [`docs/SCANNING_GUIDE.md`](docs/SCANNING_GUIDE.md) — how to run a scan and read results
+- [`docs/MODULE_DEVELOPMENT.md`](docs/MODULE_DEVELOPMENT.md) — writing a scanner module
+- [`docs/API.md`](docs/API.md) — REST API mode
+- [`docs/CICD_INTEGRATION.md`](docs/CICD_INTEGRATION.md) — pipeline integration
+- [`payloads/README.md`](payloads/README.md) — probe/payload sets
+
+---
+
+## Legal
+
+VortexDAST is for authorised security testing and education only. Scanning,
+port-scanning, or fuzzing systems you do not own or have explicit written
+permission to test may be illegal. You are responsible for staying within your
+authorised scope. When orchestrating external tools, their licences and terms
+apply to your use of them.

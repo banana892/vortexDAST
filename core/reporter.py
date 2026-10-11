@@ -37,9 +37,10 @@ from urllib.parse import urlsplit
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich import box
 from rich.text import Text
 
+from core.theme import DEFAULT_THEME, VortexTheme
+from core.ui import severity_bar, severity_counts_line
 from modules.base import CONFIDENCE_ORDER, Finding, Severity
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,14 +79,8 @@ _CVSS_RANGES: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# Rich colour codes for each severity level.
-_SEVERITY_STYLES: Dict[str, str] = {
-    Severity.CRITICAL.value:     "bold red",
-    Severity.HIGH.value:         "red",
-    Severity.MEDIUM.value:       "yellow",
-    Severity.LOW.value:          "cyan",
-    Severity.INFORMATIONAL.value: "dim",
-}
+#: Width in cells of the per-severity "Share" bar in the summary table.
+_SHARE_BAR_WIDTH = 12
 
 # Canonical severity display order (highest first).
 _SEVERITY_ORDER: List[str] = [
@@ -150,6 +145,9 @@ class Reporter:
         module list, endpoint count).
     console : rich.console.Console | None
         Custom Rich console for testing or output redirection.
+    theme : core.theme.VortexTheme | None
+        Colour theme for terminal output. Defaults to
+        :data:`~core.theme.DEFAULT_THEME` (minimal).
     """
 
     def __init__(
@@ -159,12 +157,14 @@ class Reporter:
         scan_meta: Optional[Dict[str, Any]] = None,
         console: Optional[Console] = None,
         deduplicate: bool = True,
+        theme: Optional[VortexTheme] = None,
     ) -> None:
         self.raw_findings = findings
         self.findings = self.deduplicate_findings(findings) if deduplicate else findings
         self.target = target
         self.scan_meta = scan_meta or {}
-        self._console = console or Console()
+        self._theme = theme or DEFAULT_THEME
+        self._console = console or Console(theme=self._theme.rich_theme())
         self._timestamp = datetime.now(timezone.utc).isoformat()
 
         # Pre-group findings by severity for reuse across render methods.
@@ -298,50 +298,56 @@ class Reporter:
 
     def print_terminal_summary(self) -> None:
         """
-        Render a rich colour-coded dashboard to the terminal.
+        Render the findings dashboard to the terminal using the active theme.
 
         Displays:
-          *  A header panel with scan target and timestamp.
+          *  A header with scan target, timestamp and a severity distribution bar.
           *  A severity count summary table.
           *  Per-severity finding detail tables.
+
+        All colours come from the theme's semantic tokens, so the layout is
+        identical across themes — only the palette and border weight change.
         """
         c = self._console
+        th = self._theme
+        counts = {sev: len(self._by_severity[sev]) for sev in _SEVERITY_ORDER}
 
-        # ── Header banner ─────────────────────────────────────────────────
+        # ── Header ────────────────────────────────────────────────────────
         c.print()
-        c.print(
-            Panel(
-                f"[bold white]VortexDAST[/bold white] — Scan Report\n"
-                f"[dim]Target:[/dim] [bold cyan]{self.target}[/bold cyan]\n"
-                f"[dim]Time:  [/dim] [white]{self._timestamp}[/white]\n"
-                f"[dim]Total findings: [/dim][bold]{len(self.findings)}[/bold]",
-                title="[bold]⚡ VortexDAST[/bold]",
-                border_style="bright_blue",
-                padding=(1, 4),
-            )
-        )
+        c.print(self._render_header(counts))
 
         # ── Severity summary table ─────────────────────────────────────────
         summary_table = Table(
-            title="Finding Summary",
-            box=box.ROUNDED,
+            title=Text("Finding Summary", style=th.style("vortex.title")),
+            title_justify="left",
+            box=th.table_box,
             show_header=True,
-            header_style="bold white",
-            border_style="bright_blue",
+            header_style=th.style("vortex.header"),
+            border_style=th.style("vortex.border"),
             padding=(0, 2),
         )
-        summary_table.add_column("Severity", style="bold", min_width=16)
-        summary_table.add_column("Count", justify="center", min_width=8)
-        summary_table.add_column("CVSS v3.1 Score Range", justify="center", min_width=22)
+        summary_table.add_column("Severity", min_width=14)
+        summary_table.add_column("Count", justify="right", min_width=5)
+        summary_table.add_column("Share", min_width=_SHARE_BAR_WIDTH)
+        summary_table.add_column("CVSS v3.1", justify="center", min_width=12)
 
+        total = sum(counts.values())
         for sev in _SEVERITY_ORDER:
-            count = len(self._by_severity[sev])
-            style = _SEVERITY_STYLES[sev]
-            cvss_range = _CVSS_RANGES[sev]["range"]
+            count = counts[sev]
+            style = th.severity_style(sev)
+            # Bar shows this bucket's share of all findings; any non-zero
+            # bucket gets at least one cell so a lone CRITICAL stays visible.
+            filled = max(1, round(_SHARE_BAR_WIDTH * count / total)) if count else 0
+            bar = Text(th.glyphs.bar_full * filled, style=style)
+            bar.append(
+                th.glyphs.bar_empty * (_SHARE_BAR_WIDTH - filled),
+                style=th.style("vortex.muted"),
+            )
             summary_table.add_row(
                 Text(sev.upper(), style=style),
-                Text(str(count), style=style if count > 0 else "dim"),
-                Text(cvss_range, style="dim"),
+                Text(str(count), style=style if count else th.style("vortex.muted")),
+                bar,
+                Text(_CVSS_RANGES[sev]["range"], style=th.style("vortex.muted")),
             )
         c.print(summary_table)
         c.print()
@@ -351,55 +357,131 @@ class Reporter:
             bucket = self._by_severity[sev]
             if not bucket:
                 continue
+            c.print(self._render_detail_table(sev, bucket))
+            c.print()
 
-            style = _SEVERITY_STYLES[sev]
-            detail_table = Table(
-                title=f"[{style}]{sev.upper()} Findings ({len(bucket)})[/{style}]",
-                box=box.SIMPLE_HEAVY,
-                show_header=True,
-                header_style="bold white on grey23",
-                border_style=style,
-                padding=(0, 1),
-                expand=True,
+        if not self.findings:
+            c.print(
+                Text(f"  {th.glyphs.ok} No findings reported.", style=th.style("vortex.success"))
             )
-            detail_table.add_column("#", justify="right", min_width=3, style="dim")
-            detail_table.add_column("Title", min_width=30)
-            detail_table.add_column("URL", min_width=30, overflow="fold")
-            detail_table.add_column("Param", min_width=12)
-            detail_table.add_column("CVSS", justify="center", min_width=6)
-            detail_table.add_column("Confidence", min_width=9)
-            detail_table.add_column("Module", min_width=14)
-
-            for idx, finding in enumerate(bucket, start=1):
-                module_name = finding.extra.get("module", "headers_audit")
-                param_display = finding.parameter or "—"
-                # Show real per-finding CVSS score if available; fall back to
-                # the severity-bucket approximate score.
-                if finding.cvss_score is not None:
-                    cvss_display = str(finding.cvss_score)
-                else:
-                    cvss_display = _CVSS_RANGES[sev]["score"]
-                detail_table.add_row(
-                    str(idx),
-                    Text(finding.title, style=style),
-                    Text(
-                        finding.url + (f"  (+{len(finding.extra['affected_urls']) - 1} more)"
-                                       if isinstance(finding.extra, dict) and finding.extra.get("affected_urls") else ""),
-                        style="link " + finding.url,
-                    ),
-                    Text(param_display, style="italic"),
-                    Text(cvss_display, style=style),
-                    Text(finding.confidence.value, style="dim" if finding.confidence.value == "tentative" else ""),
-                    Text(module_name, style="dim"),
-                )
-            c.print(detail_table)
             c.print()
 
         # ── Scan metadata footer ──────────────────────────────────────────
         if self.scan_meta:
-            meta_lines = [f"[dim]{k}:[/dim] {v}" for k, v in self.scan_meta.items()]
-            c.print(Panel("\n".join(meta_lines), title="Scan Metadata", border_style="dim"))
+            meta = Text()
+            width = max(len(str(k)) for k in self.scan_meta)
+            for i, (key, value) in enumerate(self.scan_meta.items()):
+                if i:
+                    meta.append("\n")
+                meta.append(f"{str(key).ljust(width)}  ", style=th.style("vortex.label"))
+                meta.append(str(value), style=th.style("vortex.muted"))
+            c.print(
+                Panel(
+                    meta,
+                    title=Text("Scan Metadata", style=th.style("vortex.title")),
+                    title_align="left",
+                    box=th.panel_box,
+                    border_style=th.style("vortex.border"),
+                    padding=(0, 2),
+                )
+            )
             c.print()
+
+    def _print_saved(self, kind: str, path: str) -> None:
+        """Print a themed one-line confirmation that a report file was written."""
+        th = self._theme
+        line = Text("  ")
+        line.append(f"{th.glyphs.ok} ", style=th.style("vortex.success"))
+        line.append(f"{kind} report saved ", style=th.style("vortex.value"))
+        line.append(f"{th.glyphs.arrow} ", style=th.style("vortex.muted"))
+        line.append(str(path), style=th.style("vortex.accent"))
+        self._console.print(line)
+
+    def _render_header(self, counts: Dict[str, int]) -> Panel:
+        """Build the dashboard header: target, timestamp, totals and severity bar."""
+        th = self._theme
+        label = th.style("vortex.label")
+
+        body = Text()
+        body.append("Target   ", style=label)
+        body.append(str(self.target), style=th.style("vortex.accent"))
+        body.append("\nTime     ", style=label)
+        body.append(self._timestamp, style=th.style("vortex.muted"))
+        body.append("\nFindings ", style=label)
+        body.append(str(len(self.findings)), style=th.style("vortex.value"))
+
+        if self.findings:
+            body.append("\n\n")
+            body.append(severity_bar(th, counts, width=44))
+            body.append("\n")
+            body.append(severity_counts_line(th, counts))
+
+        return Panel(
+            body,
+            title=Text(f"VortexDAST {th.glyphs.dash} Scan Report", style=th.style("vortex.brand")),
+            title_align="left",
+            box=th.panel_box,
+            border_style=th.style("vortex.border"),
+            padding=(0, 2),
+        )
+
+    def _render_detail_table(self, severity: str, bucket: List[Finding]) -> Table:
+        """Build the detail table for one severity bucket."""
+        th = self._theme
+        style = th.severity_style(severity)
+
+        table = Table(
+            title=Text(f"{severity.upper()} {th.glyphs.dash} {len(bucket)} finding(s)", style=style),
+            title_justify="left",
+            box=th.table_box,
+            show_header=True,
+            header_style=th.style("vortex.header"),
+            border_style=th.style("vortex.border"),
+            padding=(0, 1),
+        )
+        # Title and URL are capped and allowed to fold; the short right-hand
+        # columns stay fixed. Rich then squeezes only the two wide columns on a
+        # narrow terminal, so severity, CVSS and module are never clipped.
+        table.add_column("#", justify="right", width=3, style=th.style("vortex.muted"))
+        table.add_column("Title", max_width=38, overflow="fold")
+        table.add_column("URL", max_width=46, overflow="fold")
+        table.add_column("Param", max_width=14, no_wrap=True, overflow="ellipsis")
+        table.add_column("CVSS", justify="center", width=5)
+        table.add_column("Confidence", width=10)
+        table.add_column("Module", no_wrap=True)
+
+        for idx, finding in enumerate(bucket, start=1):
+            module_name = finding.extra.get("module", "headers_audit")
+            param_display = finding.parameter or th.glyphs.dash
+            # Show real per-finding CVSS score if available; fall back to
+            # the severity-bucket approximate score.
+            if finding.cvss_score is not None:
+                cvss_display = str(finding.cvss_score)
+            else:
+                cvss_display = _CVSS_RANGES[severity]["score"]
+
+            extra_urls = (
+                f"  (+{len(finding.extra['affected_urls']) - 1} more)"
+                if isinstance(finding.extra, dict) and finding.extra.get("affected_urls")
+                else ""
+            )
+            tentative = finding.confidence.value == "tentative"
+            table.add_row(
+                str(idx),
+                Text(finding.title, style=style),
+                Text(
+                    finding.url + extra_urls,
+                    style=f"{th.style('vortex.url')} link {finding.url}",
+                ),
+                Text(param_display, style=th.style("vortex.param")),
+                Text(cvss_display, style=style),
+                Text(
+                    finding.confidence.value,
+                    style=th.style("vortex.muted") if tentative else th.style("vortex.info"),
+                ),
+                Text(module_name, style=th.style("vortex.module")),
+            )
+        return table
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -437,7 +519,7 @@ class Reporter:
         data = self.to_dict()
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2, ensure_ascii=False)
-        self._console.print(f"[green]✔[/green] JSON report saved → [cyan]{path}[/cyan]")
+        self._print_saved("JSON", path)
 
     def save_markdown(self, path: str) -> None:
         """
@@ -454,7 +536,7 @@ class Reporter:
         content = self._render_markdown()
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(content)
-        self._console.print(f"[green]✔[/green] Markdown report saved → [cyan]{path}[/cyan]")
+        self._print_saved("Markdown", path)
 
     def save_html(self, path: str) -> None:
         """
@@ -472,7 +554,7 @@ class Reporter:
         content = self._render_html()
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(content)
-        self._console.print(f"[green]✔[/green] HTML report saved → [cyan]{path}[/cyan]")
+        self._print_saved("HTML", path)
 
     def save_pdf(self, path: str) -> None:
         """
@@ -497,7 +579,7 @@ class Reporter:
         _ensure_dir(path)
         html_content = self._render_html()
         HTML(string=html_content).write_pdf(path)
-        self._console.print(f"[green]✔[/green] PDF report saved → [cyan]{path}[/cyan]")
+        self._print_saved("PDF", path)
 
     def to_sarif(self) -> Dict[str, Any]:
         """Serialise findings as a SARIF 2.1.0 log (GitHub code scanning, IDEs, CI tooling)."""
@@ -577,7 +659,7 @@ class Reporter:
         _ensure_dir(path)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(self.to_sarif(), fh, indent=2, ensure_ascii=False)
-        self._console.print(f"[green]✔[/green] SARIF report saved → [cyan]{path}[/cyan]")
+        self._print_saved("SARIF", path)
 
     def save(self, path: str) -> None:
         """

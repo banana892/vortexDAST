@@ -73,7 +73,6 @@
         "7 PERMISSION_DENIED",
         "Missing or insufficient permissions",
         "INVALID_ARGUMENT",
-        "Database Error",
         "Error: value for argument"
       ],
       "Generic": [

@@ -89,7 +89,7 @@ setup(
     python_requires=">=3.9",
 
     # ── Package discovery ─────────────────────────────────────────────────────
-    # Finds core/, modules/, payloads/ sub-packages automatically.
+    # Finds core/, modules/, adapters/, payloads/ sub-packages automatically.
     packages=find_packages(
         exclude=["tests", "tests.*", "*.egg-info"],
     ),

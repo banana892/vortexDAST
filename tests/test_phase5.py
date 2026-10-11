@@ -726,8 +726,18 @@ class TestCLIParser:
 class TestModuleResolution:
 
     def test_all_resolves_to_all_modules(self) -> None:
+        # "all" expands to every registered module except opt-in ones
+        # (e.g. the host-scoped port scanner), which must be requested explicitly.
+        from scanner import _OPT_IN_MODULES
+
         resolved = _resolve_modules("all")
-        assert set(resolved) == set(MODULE_REGISTRY.keys())
+        assert set(resolved) == set(MODULE_REGISTRY.keys()) - set(_OPT_IN_MODULES)
+        assert "port_scan" not in resolved
+
+    def test_opt_in_module_resolved_when_named(self) -> None:
+        # Opt-in modules are still runnable when selected explicitly.
+        resolved = _resolve_modules("port_scan")
+        assert resolved == ["port_scan"]
 
     def test_single_module_resolved(self) -> None:
         resolved = _resolve_modules("xss_check")

@@ -12,7 +12,13 @@ Authentication
 --------------
 When the ``VORTEX_API_KEY`` environment variable is set, every request must
 include a matching ``Authorization: Bearer <key>`` header (or ``X-API-Key``
-header).  When the env var is unset, auth is disabled (local development).
+header).
+
+The API **fails closed**: when no key is configured, protected endpoints return
+HTTP 503 and refuse to run scans.  Running without authentication must be opted
+into explicitly — pass ``--allow-unauthenticated`` (or set
+``VORTEX_ALLOW_UNAUTHENTICATED=1``), and only on a trusted local interface.
+``/health`` stays public regardless so liveness checks keep working.
 
 Storage
 -------
@@ -75,25 +81,53 @@ class APIKeyMiddleware:
     """
     ASGI middleware that enforces Bearer-token or X-API-Key authentication.
 
-    When ``api_key`` is ``None`` (env var unset), all requests are allowed
-    (local-dev mode). Otherwise the request must carry a matching key.
+    Fail-closed: when ``api_key`` is ``None`` (no key configured), protected
+    endpoints are refused with HTTP 503 unless ``allow_unauthenticated`` is
+    ``True`` — an explicit opt-in to running without auth. Otherwise the request
+    must carry a matching key. ``/health`` is always public.
     """
 
     # Paths that never require authentication.
     _PUBLIC_PATHS = frozenset({"/health"})
 
-    def __init__(self, app: ASGIApp, api_key: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        api_key: Optional[str] = None,
+        allow_unauthenticated: bool = False,
+    ) -> None:
         self.app = app
         self.api_key = api_key
+        self.allow_unauthenticated = allow_unauthenticated
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or self.api_key is None:
+        # Non-HTTP scopes (lifespan, websocket) pass through untouched.
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
         path = scope.get("path", "")
         if path in self._PUBLIC_PATHS:
             await self.app(scope, receive, send)
+            return
+
+        if self.api_key is None:
+            # No key configured. Fail closed unless the operator explicitly
+            # opted into unauthenticated mode.
+            if self.allow_unauthenticated:
+                await self.app(scope, receive, send)
+                return
+            response = JSONResponse(
+                {
+                    "error": "server_misconfigured",
+                    "detail": (
+                        "No API key configured. Set VORTEX_API_KEY, or start the "
+                        "server with --allow-unauthenticated to run without auth."
+                    ),
+                },
+                status_code=503,
+            )
+            await response(scope, receive, send)
             return
 
         # Extract token from headers.
@@ -108,6 +142,11 @@ class APIKeyMiddleware:
             return
 
         await self.app(scope, receive, send)
+
+
+def _env_truthy(value: Optional[str]) -> bool:
+    """Interpret an env-var string as a boolean flag."""
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _extract_token(headers: Dict[bytes, bytes]) -> Optional[str]:
@@ -266,6 +305,7 @@ def create_app(
     *,
     api_key: Optional[str] = None,
     persist_dir: Optional[str] = None,
+    allow_unauthenticated: bool = False,
 ) -> Starlette:
     """
     Build the VortexDAST Starlette ASGI app.
@@ -278,9 +318,31 @@ def create_app(
     persist_dir : str | None
         Directory for JSON job persistence.  Defaults to the ``VORTEX_JOBS_DIR``
         env var.  When ``None`` / unset, jobs are in-memory only.
+    allow_unauthenticated : bool
+        Explicit opt-in to running without authentication when no ``api_key`` is
+        configured.  Defaults to the ``VORTEX_ALLOW_UNAUTHENTICATED`` env var.
+        When neither a key nor this flag is set, the API **fails closed**:
+        protected endpoints return HTTP 503.
     """
     resolved_key = api_key if api_key is not None else os.environ.get("VORTEX_API_KEY")
     resolved_dir = persist_dir if persist_dir is not None else os.environ.get("VORTEX_JOBS_DIR")
+    allow_unauth = allow_unauthenticated or _env_truthy(
+        os.environ.get("VORTEX_ALLOW_UNAUTHENTICATED")
+    )
+
+    if resolved_key is None:
+        if allow_unauth:
+            logger.warning(
+                "VORTEX_API_KEY is not set and unauthenticated mode is enabled: "
+                "the API is serving WITHOUT authentication. Only do this on a "
+                "trusted, local interface."
+            )
+        else:
+            logger.error(
+                "VORTEX_API_KEY is not set; protected endpoints will return HTTP "
+                "503. Set VORTEX_API_KEY, or pass --allow-unauthenticated "
+                "(VORTEX_ALLOW_UNAUTHENTICATED=1) to run without auth."
+            )
 
     store = JobStore(persist_dir=resolved_dir)
     pool = ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="vdast-api")
@@ -384,7 +446,13 @@ def create_app(
 
     app = Starlette(
         routes=routes,
-        middleware=[Middleware(APIKeyMiddleware, api_key=resolved_key)],
+        middleware=[
+            Middleware(
+                APIKeyMiddleware,
+                api_key=resolved_key,
+                allow_unauthenticated=allow_unauth,
+            )
+        ],
     )
     app.state.store = store
     return app
@@ -404,10 +472,18 @@ def _send_callback(url: str, report: ScanReport) -> None:
 app = create_app()
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:  # pragma: no cover
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    *,
+    allow_unauthenticated: bool = False,
+) -> None:  # pragma: no cover
     import uvicorn  # noqa: PLC0415
 
-    uvicorn.run(app, host=host, port=port)
+    # Rebuild the app so the CLI flag reaches the auth middleware (the
+    # module-level ``app`` is configured from env vars only).
+    application = create_app(allow_unauthenticated=allow_unauthenticated)
+    uvicorn.run(application, host=host, port=port)
 
 
 def _cli() -> None:  # pragma: no cover - thin argparse wrapper
@@ -418,8 +494,17 @@ def _cli() -> None:  # pragma: no cover - thin argparse wrapper
     )
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1).")
     parser.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000).")
+    parser.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        help=(
+            "Run without authentication when VORTEX_API_KEY is unset. Without "
+            "this, protected endpoints fail closed (HTTP 503). Use only on a "
+            "trusted local interface."
+        ),
+    )
     args = parser.parse_args()
-    run_server(args.host, args.port)
+    run_server(args.host, args.port, allow_unauthenticated=args.allow_unauthenticated)
 
 
 if __name__ == "__main__":  # pragma: no cover

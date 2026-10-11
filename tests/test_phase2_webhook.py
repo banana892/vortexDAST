@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from core.notify import build_payload, send_webhook
+from core.notify import _webhook_target_is_safe, build_payload, send_webhook
 from modules.base import Confidence, Finding, Severity
 from scanner import _build_parser, run_scan
 
@@ -121,13 +121,16 @@ def target_site() -> Iterator[Tuple[str, List[Dict[str, str]]]]:
 
 def test_send_webhook_posts_json(webhook_sink: Any) -> None:
     base, received = webhook_sink
-    assert send_webhook(base + "/hook", {"text": "hi"}) is True
+    # Loopback sink: opt in past the SSRF guard (receiver we control).
+    assert send_webhook(base + "/hook", {"text": "hi"}, allow_private=True) is True
     assert received[0]["body"] == {"text": "hi"}
 
 
 def test_failed_webhook_logs_host_only(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level("WARNING", logger="core.notify"):
-        assert send_webhook("http://127.0.0.1:9/T000/B000/SECRETTOKEN", {"text": "x"}) is False
+        assert send_webhook(
+            "http://127.0.0.1:9/T000/B000/SECRETTOKEN", {"text": "x"}, allow_private=True
+        ) is False
     assert "127.0.0.1:9" in caplog.text
     assert "SECRETTOKEN" not in caplog.text
 
@@ -138,7 +141,7 @@ def test_scan_posts_summary_without_target_credentials(webhook_sink: Any, target
     args = _build_parser().parse_args([
         "-u", target_url, "-m", "headers_audit", "--max-depth", "0", "--rate-limit", "0",
         "-H", "Authorization: Bearer target-secret", "--cookie", "sid=target-session",
-        "--webhook", base + "/hook",
+        "--webhook", base + "/hook", "--allow-private-webhook",
     ])
     exit_code = run_scan(args)
 
@@ -160,3 +163,44 @@ def test_scan_posts_summary_without_target_credentials(webhook_sink: Any, target
 def test_invalid_webhook_scheme_aborts_before_scanning() -> None:
     args = _build_parser().parse_args(["-u", "http://127.0.0.1:9", "--webhook", "ftp://x/hook"])
     assert run_scan(args) == 1
+
+
+# ── SSRF guard ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/hook",            # loopback
+        "http://localhost/hook",            # loopback via name
+        "http://169.254.169.254/latest",    # cloud metadata (link-local)
+        "http://10.0.0.5/hook",             # RFC1918
+        "http://192.168.1.10/hook",         # RFC1918
+        "http://[::1]/hook",                # IPv6 loopback
+        "http://0.0.0.0/hook",              # unspecified
+    ],
+)
+def test_internal_targets_are_unsafe(url: str) -> None:
+    safe, _reason = _webhook_target_is_safe(url)
+    assert safe is False
+
+
+def test_public_target_is_safe() -> None:
+    safe, _reason = _webhook_target_is_safe("https://hooks.slack.com/services/T/B/x")
+    assert safe is True
+
+
+def test_send_webhook_blocks_internal_by_default(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING", logger="core.notify"):
+        # No connection should be attempted; port 9 would hang/refuse otherwise.
+        assert send_webhook("http://169.254.169.254/latest/meta-data/", {"text": "x"}) is False
+    assert "blocked" in caplog.text
+
+
+def test_env_allows_internal_webhook(
+    webhook_sink: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, received = webhook_sink
+    monkeypatch.setenv("VORTEX_ALLOW_PRIVATE_WEBHOOK", "1")
+    assert send_webhook(base + "/hook", {"text": "hi"}) is True
+    assert received[0]["body"] == {"text": "hi"}
