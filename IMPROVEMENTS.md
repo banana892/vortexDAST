@@ -207,9 +207,10 @@ Ordered by impact; several are now *resolved by the plan above*.
   method/auth/cookie rebuilding), dropping and logging the first hop that
   leaves scope. An off-scope 30x can no longer carry a probe to an unintended
   host. Native behaviour is retained when no guard is set.
-- **API auth fails open** — `core/api.py` allows all requests when
-  `VORTEX_API_KEY` is unset. Should fail closed or require an explicit
-  `--allow-unauthenticated`.
+- **API auth fails open** — ✅ *fixed.* `core/api.py` now fails closed: with
+  no `VORTEX_API_KEY` configured, protected endpoints return HTTP 503.
+  Unauthenticated operation is an explicit opt-in (`--allow-unauthenticated` /
+  `VORTEX_ALLOW_UNAUTHENTICATED=1`); `/health` stays public throughout.
 - **Webhook SSRF** — `callback_url` validates scheme only; resolve-and-block
   RFC1918/link-local before posting.
 - **Known false positives** — Firebase NoSQL pattern includes the broad string

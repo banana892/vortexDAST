@@ -11,6 +11,24 @@ vortex-api --host 127.0.0.1 --port 8000
 
 Only scan targets you are authorised to test.
 
+## Authentication
+
+The API **fails closed**. Set `VORTEX_API_KEY` and every request (except
+`/health`) must then carry it:
+
+```bash
+export VORTEX_API_KEY="$(openssl rand -hex 32)"
+vortex-api --port 8000
+curl -H "Authorization: Bearer $VORTEX_API_KEY" http://127.0.0.1:8000/modules
+# X-API-Key: <key> works too
+```
+
+If **no** key is configured, protected endpoints return `503
+server_misconfigured` and refuse to run scans. To run without auth (local
+development only, on a trusted interface), opt in explicitly with
+`--allow-unauthenticated` or `VORTEX_ALLOW_UNAUTHENTICATED=1`. `/health` stays
+public in every mode so liveness checks keep working.
+
 ## Endpoints
 
 | Method | Path | Description |

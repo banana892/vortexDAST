@@ -41,7 +41,9 @@ def client(monkeypatch):
         )
 
     monkeypatch.setattr(api, "execute_scan", fake_execute_scan)
-    app = api.create_app()
+    # These tests exercise functionality, not auth: opt into unauthenticated
+    # mode explicitly (the API otherwise fails closed with no key configured).
+    app = api.create_app(allow_unauthenticated=True)
     with TestClient(app) as c:
         yield c
 

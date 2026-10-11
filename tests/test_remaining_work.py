@@ -111,6 +111,32 @@ class TestPhase2APIAuthAndPersistence:
             )
             assert resp.status_code == 200
 
+    def test_fails_closed_without_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # No key configured and no opt-in → protected endpoints fail closed.
+        monkeypatch.delenv("VORTEX_API_KEY", raising=False)
+        monkeypatch.delenv("VORTEX_ALLOW_UNAUTHENTICATED", raising=False)
+        app = create_app()
+        with TestClient(app) as client:
+            resp = client.get("/modules")
+            assert resp.status_code == 503
+            assert resp.json()["error"] == "server_misconfigured"
+            # Liveness stays public even when fail-closed.
+            assert client.get("/health").status_code == 200
+
+    def test_allow_unauthenticated_opt_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("VORTEX_API_KEY", raising=False)
+        monkeypatch.delenv("VORTEX_ALLOW_UNAUTHENTICATED", raising=False)
+        app = create_app(allow_unauthenticated=True)
+        with TestClient(app) as client:
+            assert client.get("/modules").status_code == 200
+
+    def test_env_allow_unauthenticated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("VORTEX_API_KEY", raising=False)
+        monkeypatch.setenv("VORTEX_ALLOW_UNAUTHENTICATED", "1")
+        app = create_app()
+        with TestClient(app) as client:
+            assert client.get("/modules").status_code == 200
+
     def test_job_store_persists_and_reloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             store1 = JobStore(persist_dir=tmp_dir)
