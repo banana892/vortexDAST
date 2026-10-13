@@ -201,26 +201,35 @@ own quality:
   unauthenticated (doesn't carry the scan's cookie jar into the browser
   context yet — that's the authenticated-scanning follow-up below, not
   done here).
-- **API testing** — 🚧 *scoped, not started.* Today nothing in the crawl/parse
-  pipeline carries a JSON body, a content-type, or a REST path-param concept:
-  `CrawledEndpoint` (`core/crawler.py`) has only `forms`/`links`/`query_params`,
-  and `ParsedForm` (`core/parser.py`) is HTML-input-shaped. The one piece of
-  prior art, `nosql_check.py`'s `_fuzz_json_body`, just re-serializes an HTML
-  form's own fields as JSON — it doesn't discover a real API body at all.
-  Scoped as:
-  1. **Discovery — passive capture, dynamic-crawl-only.** `DomWatcher`
-     (`core/dom_watcher.py`) already drives headless Chromium under
-     `--dynamic`; add `page.on("request")`/`"requestfinished"` capture of
-     any outgoing call with `Content-Type: application/json` (method, URL,
-     parsed body, headers), deduped and capped like
-     `interactsh_adapter.py`'s `_MAX_PROBES`. A new `CapturedJsonRequest`
-     feeds a new `CrawledEndpoint.json_requests` field (default empty —
-     every other module unaffected). Static-only scans get **no** JSON
-     coverage in v1; a `--no-json-fuzz` opt-out exists but there's no
-     static-crawl fallback, since a static pass never executes the page's
-     own `fetch()`/XHR calls to observe a body in the first place.
-  2. **Fuzzing — generalize the per-param pattern onto JSON leaves and REST
-     path segments**, reusing each module's *existing* probe sets rather
+- **API testing** — 🚧 *discovery shipped, fuzzing not started.* Until now
+  nothing in the crawl/parse pipeline carried a JSON body, a content-type,
+  or a REST path-param concept: `CrawledEndpoint` (`core/crawler.py`) had
+  only `forms`/`links`/`query_params`, and `ParsedForm` (`core/parser.py`)
+  is HTML-input-shaped. The one piece of prior art, `nosql_check.py`'s
+  `_fuzz_json_body`, just re-serializes an HTML form's own fields as JSON —
+  it doesn't discover a real API body at all. Scoped as:
+  1. ✅ *shipped:* **Discovery — passive capture, dynamic-crawl-only.**
+     `DomWatcher` (`core/dom_watcher.py`) registers a Playwright
+     `page.on("request", ...)` listener while driving `--dynamic`'s
+     headless Chromium, capturing any outgoing `POST`/`PUT`/`PATCH` call
+     whose `Content-Type` is `application/json` (method, URL, parsed body,
+     headers) — deduped per (method, URL) and capped at
+     `DEFAULT_MAX_CAPTURED_JSON` (40), the same volume-control shape as
+     `interactsh_adapter.py`'s `_MAX_PROBES`. Each capture becomes its own
+     synthetic `CrawledEndpoint` (new `CapturedJsonRequest` in
+     `core/crawler.py`, carried on the new `CrawledEndpoint.json_requests`
+     field — default empty, every other module unaffected), merged into
+     the scan's endpoint list by `scanner.py`'s existing dynamic-crawl
+     merge with no changes needed there. `--no-json-fuzz` (CLI) /
+     `crawler.json_fuzz: false` (config) opt out; on by default whenever
+     `--dynamic` runs. Static-only scans still get **no** JSON coverage in
+     v1 — there's no fallback, since a static pass never executes the
+     page's own `fetch()`/XHR calls to observe a body in the first place.
+     Verified against a real headless-Chromium run (`tests/test_dom_watcher.py`):
+     a fixture page's inline `fetch()` POST is captured as a synthetic
+     `/api/widgets` endpoint carrying the exact JSON body sent.
+  2. 🚧 *not started:* **Fuzzing — generalize the per-param pattern onto
+     JSON leaves and REST path segments**, reusing each module's *existing* probe sets rather
      than adding new ones. A new shared `core/json_fuzz.py` walks a nested
      JSON body into `(json-pointer-path, value)` leaves and rebuilds the
      body with one leaf substituted at a time — the JSON equivalent of what
@@ -495,3 +504,10 @@ Ordered by impact; several are now *resolved by the plan above*.
   each module's existing probes, and OpenAPI/Swagger/Postman import
   deferred to its own follow-up phase as a second feed into the same
   discovery list.
+- 2026-10-13 — Phase D API testing, discovery half shipped: `DomWatcher`
+  now passively captures JSON `fetch`/XHR calls a page's own JS makes
+  during `--dynamic` crawling (`page.on("request")`, deduped/capped), each
+  one becoming a synthetic `CrawledEndpoint` via the new
+  `CapturedJsonRequest`/`json_requests` field. `--no-json-fuzz` /
+  `crawler.json_fuzz` opt out. The fuzzing half (JSON-leaf and REST
+  path-segment substitution) and spec import remain open.

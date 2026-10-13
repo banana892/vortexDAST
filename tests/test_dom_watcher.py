@@ -60,6 +60,15 @@ _PAGES = {
         document.getElementById('root').innerHTML = '<a href="/page4">Page4</a>';
         </script></body></html>""",
     "/page4": """<!DOCTYPE html><html><body>unreachable at max_depth=2</body></html>""",
+    # Issues a JSON fetch() POST on load — the real API traffic a static
+    # crawler can never observe, since it never runs this script at all.
+    "/jsonapi": """<!DOCTYPE html><html><body><script>
+        fetch('/api/widgets', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: 'gadget', qty: 3})
+        }).catch(() => {});
+        </script></body></html>""",
 }
 
 
@@ -171,6 +180,40 @@ class TestDomWatcherCrawl:
         result = DomWatcher(max_depth=2).crawl(spa_server, scope_guard=guard)
         # Seed itself is always rendered once; its children are all filtered.
         assert len(result.endpoints) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JSON API capture — passive fetch()/XHR observation (Phase D, scoped in
+# IMPROVEMENTS.md's "API testing" entry)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDomWatcherJsonCapture:
+    _TIMEOUT_MS = 2000
+
+    def test_captures_json_fetch_as_synthetic_endpoint(self, spa_server):
+        result = DomWatcher(max_depth=0, nav_timeout_ms=self._TIMEOUT_MS).crawl(
+            spa_server + "jsonapi"
+        )
+        api_endpoints = [ep for ep in result.endpoints if ep.url.endswith("/api/widgets")]
+        assert len(api_endpoints) == 1
+
+        endpoint = api_endpoints[0]
+        assert len(endpoint.json_requests) == 1
+        captured = endpoint.json_requests[0]
+        assert captured.method == "POST"
+        assert captured.body == {"name": "gadget", "qty": 3}
+
+        # The page itself still gets its own (JSON-free) endpoint as usual.
+        page_endpoint = next(ep for ep in result.endpoints if ep.url.endswith("/jsonapi"))
+        assert page_endpoint.json_requests == []
+
+    def test_capture_json_false_disables_it(self, spa_server):
+        result = DomWatcher(
+            max_depth=0, nav_timeout_ms=self._TIMEOUT_MS, capture_json=False
+        ).crawl(spa_server + "jsonapi")
+        assert all(ep.json_requests == [] for ep in result.endpoints)
+        assert not any(ep.url.endswith("/api/widgets") for ep in result.endpoints)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -22,13 +22,21 @@ the HTML came from.
 Design
 ------
 * Reuses ``ScopeGuard``/``HTMLParser``/``CrawledEndpoint``/``CrawlResult`` —
-  no parallel data model, no new report fields.
+  no parallel data model.
 * Meant to be *composed* with the static crawl (see ``crawler.py``'s module
   docstring): run after it, keep everything the static pass already found,
   and merge in only the endpoints the static pass could never have seen
   (scanner.py does this merge).
 * One browser, one page, navigated sequentially (BFS, same depth semantics
   as :class:`~core.crawler.Crawler`).
+* Also passively captures JSON ``fetch``/XHR calls the rendered page's own
+  JS makes (``Content-Type: application/json``, ``POST``/``PUT``/``PATCH``)
+  — the one piece of real API traffic the static crawler can never observe.
+  Each distinct (method, URL) becomes its own synthetic
+  :class:`~core.crawler.CrawledEndpoint` carrying the captured body in
+  ``json_requests``, merged in by ``scanner.py`` the same way as any other
+  dynamically-discovered endpoint. ``capture_json=False`` (or CLI
+  ``--no-json-fuzz``) disables it.
 
 shortcut: single page, no concurrency — Playwright's sync API isn't
 thread-safe the way the static crawler's worker pool needs, and JS
@@ -43,10 +51,11 @@ not done here.
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Set, Tuple
 
-from .crawler import CrawledEndpoint, CrawlResult, Crawler, ScopeGuard
+from .crawler import CapturedJsonRequest, CrawledEndpoint, CrawlResult, Crawler, ScopeGuard
 from .parser import HTMLParser, ParsedPage
 
 logger = logging.getLogger(__name__)
@@ -60,6 +69,10 @@ DEFAULT_NAV_TIMEOUT_MS = 20_000
 #: mutating the DOM after its last network request (e.g. a render tied to a
 #: timer or an animation frame rather than a fetch).
 DEFAULT_SETTLE_MS = 1_500
+#: Hard cap on distinct (method, URL) JSON requests captured per crawl —
+#: bounds synthetic-endpoint growth against a chatty SPA that polls the same
+#: API repeatedly.
+DEFAULT_MAX_CAPTURED_JSON = 40
 
 
 class DomWatcher:
@@ -72,12 +85,16 @@ class DomWatcher:
         nav_timeout_ms: int = DEFAULT_NAV_TIMEOUT_MS,
         settle_ms: int = DEFAULT_SETTLE_MS,
         parser: Optional[HTMLParser] = None,
+        capture_json: bool = True,
+        max_captured_json: int = DEFAULT_MAX_CAPTURED_JSON,
     ) -> None:
         self.max_depth = max_depth
         self.max_pages = max_pages
         self.nav_timeout_ms = nav_timeout_ms
         self.settle_ms = settle_ms
         self.parser = parser or HTMLParser()
+        self.capture_json = capture_json
+        self.max_captured_json = max_captured_json
 
     def crawl(self, seed_url: str, scope_guard: Optional[ScopeGuard] = None) -> CrawlResult:
         """
@@ -89,6 +106,8 @@ class DomWatcher:
         because the dynamic pass couldn't run.
         """
         result = CrawlResult(seed_url=seed_url)
+        self._captured_json: List[CapturedJsonRequest] = []
+        self._captured_json_keys: Set[Tuple[str, str]] = set()
 
         try:
             from playwright.sync_api import Error as PlaywrightError
@@ -120,6 +139,8 @@ class DomWatcher:
                 try:
                     page = browser.new_page()
                     page.set_default_navigation_timeout(self.nav_timeout_ms)
+                    if self.capture_json:
+                        page.on("request", self._on_request)
 
                     while frontier and len(result.endpoints) < self.max_pages:
                         url, depth = frontier.pop(0)
@@ -136,11 +157,73 @@ class DomWatcher:
         except Exception as exc:  # noqa: BLE001 — a crashed browser must not sink the scan
             logger.error("Dynamic crawl aborted: %s", exc)
 
+        if self._captured_json:
+            # Each captured call becomes its own synthetic endpoint (no
+            # forms/links, just the one JSON request) so every downstream
+            # module can fuzz it via CrawledEndpoint.json_requests exactly
+            # like it already fuzzes endpoint.forms — no new module hook.
+            #
+            # shortcut: dedup/merge is by URL alone, so two captures to the
+            # same URL with different HTTP methods collapse into one
+            # synthetic endpoint; upgrade to (method, url) if that turns out
+            # to matter in practice.
+            existing_urls = result.all_urls
+            added = 0
+            for captured in self._captured_json:
+                if captured.url in existing_urls:
+                    continue
+                result.endpoints.append(
+                    CrawledEndpoint(
+                        url=captured.url,
+                        status_code=0,
+                        depth=0,
+                        query_params=HTMLParser.extract_query_params(captured.url),
+                        json_requests=[captured],
+                    )
+                )
+                existing_urls.add(captured.url)
+                added += 1
+            if added:
+                logger.info("  + %d JSON API endpoint(s) captured from page JS", added)
+
         logger.info(
             "Dynamic crawl complete | seed=%s | endpoints=%d | failed=%d",
             seed_url, len(result.endpoints), len(result.failed_urls),
         )
         return result
+
+    def _on_request(self, request: Any) -> None:
+        """
+        Record a same-page JSON ``fetch``/XHR call. Never raises: a
+        malformed or unreadable request is simply skipped, since this runs
+        on Playwright's event thread and an exception here must not be able
+        to take the browser down mid-crawl.
+        """
+        if len(self._captured_json) >= self.max_captured_json:
+            return
+        try:
+            method = request.method
+            if method not in ("POST", "PUT", "PATCH"):
+                return
+            content_type = request.headers.get("content-type", "")
+            if "application/json" not in content_type.lower():
+                return
+            post_data = request.post_data
+            if not post_data:
+                return
+            body = json.loads(post_data)
+        except Exception:  # noqa: BLE001 — see docstring
+            return
+
+        key = (method, request.url)
+        if key in self._captured_json_keys:
+            return
+        self._captured_json_keys.add(key)
+        self._captured_json.append(
+            CapturedJsonRequest(
+                url=request.url, method=method, body=body, headers=dict(request.headers)
+            )
+        )
 
     # ── Internal ─────────────────────────────────────────────────────────
 

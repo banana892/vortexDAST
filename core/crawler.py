@@ -45,7 +45,7 @@ import logging
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from .parser import HTMLParser, ParsedPage
@@ -57,6 +57,29 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Data models
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class CapturedJsonRequest:
+    """
+    A JSON API request a page's own JavaScript made (``fetch``/XHR),
+    observed during a dynamic (Playwright) crawl — see ``core/dom_watcher.py``.
+
+    This is the one piece of real API traffic the *static* crawler can never
+    see, since it never executes a page's client-side code.
+    """
+
+    url: str
+    """Absolute URL the request was sent to."""
+
+    method: str
+    """HTTP method (``POST``, ``PUT``, ``PATCH``, ...)."""
+
+    body: Any
+    """Parsed JSON body (``dict`` or ``list``)."""
+
+    headers: Dict[str, str] = field(default_factory=dict)
+    """Request headers as sent by the browser."""
 
 
 @dataclass
@@ -89,6 +112,10 @@ class CrawledEndpoint:
 
     response_headers: Dict[str, str] = field(default_factory=dict)
     """HTTP response headers — used by the headers auditor module."""
+
+    json_requests: List[CapturedJsonRequest] = field(default_factory=list)
+    """JSON API requests captured from the page's own JS during a dynamic
+    crawl (empty for every statically-crawled endpoint)."""
 
 
 @dataclass

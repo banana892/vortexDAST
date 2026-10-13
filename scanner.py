@@ -242,7 +242,7 @@ def _load_config(path: str) -> Dict[str, Any]:
         Parsed configuration dictionary.
     """
     _DEFAULTS: Dict[str, Any] = {
-        "crawler":   {"max_depth": 3, "dynamic_crawl": False},
+        "crawler":   {"max_depth": 3, "dynamic_crawl": False, "json_fuzz": True},
         "requester": {
             "timeout": 10,
             "user_agent": "VortexDAST/1.0",
@@ -773,6 +773,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Enable Playwright headless browser crawling for JS-rendered SPAs. "
             "Requires: playwright install chromium"
+        ),
+    )
+    parser.add_argument(
+        "--no-json-fuzz",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable capturing JSON API requests (fetch/XHR) made by the "
+            "page's own JavaScript during --dynamic crawling, so they're not "
+            "added as endpoints for the scanner modules to fuzz. Has no "
+            "effect without --dynamic — only the dynamic crawl can observe "
+            "a page's own JS making these calls."
         ),
     )
     parser.add_argument(
@@ -1654,9 +1666,12 @@ def run_scan(args: argparse.Namespace) -> int:
         if dynamic_enabled:
             ui.phase(console, theme, 2, "Dynamic crawl", f"Playwright, max depth {max_depth}")
             scope_guard = ScopeGuard.from_seed(args.target, scope_cfg)
-            dynamic_result = DomWatcher(max_depth=max_depth).crawl(
-                args.target, scope_guard=scope_guard
+            json_fuzz_enabled = (
+                not args.no_json_fuzz and bool(crawler_cfg.get("json_fuzz", True))
             )
+            dynamic_result = DomWatcher(
+                max_depth=max_depth, capture_json=json_fuzz_enabled
+            ).crawl(args.target, scope_guard=scope_guard)
 
             existing_urls = crawl_result.all_urls
             new_endpoints = [
@@ -1664,11 +1679,15 @@ def run_scan(args: argparse.Namespace) -> int:
             ]
             crawl_result.endpoints.extend(new_endpoints)
 
+            json_endpoints = sum(1 for ep in new_endpoints if ep.json_requests)
+            detail = f"({len(dynamic_result.failed_urls)} failed)"
+            if json_endpoints:
+                detail = f"{json_endpoints} JSON API {detail}"
             ui.status(
                 console, theme,
                 "ok" if new_endpoints else "info",
                 f"Dynamic crawl complete — {len(new_endpoints)} new endpoint(s)",
-                f"({len(dynamic_result.failed_urls)} failed)",
+                detail,
             )
 
         # ── Endpoint list ─────────────────────────────────────────────────
