@@ -1,0 +1,20 @@
+{
+  "meta": {
+    "description": "Unrestricted-file-upload probes. Every upload sends a short, clearly-marked, inert text body (never executable payload content) under a dangerous extension and a spoofed image Content-Type — testing whether extension/content-type validation exists at all. Nothing uploaded is ever requested for execution.",
+    "safe": true
+  },
+  "dangerous_extensions": [
+    {"id": "upload_php", "extension": ".php", "description": "PHP script — executes on Apache/nginx+PHP-FPM if the upload dir is web-reachable"},
+    {"id": "upload_phtml", "extension": ".phtml", "description": "Alternate PHP extension some servers still execute"},
+    {"id": "upload_jsp", "extension": ".jsp", "description": "JSP script — executes on Tomcat/Java app servers"},
+    {"id": "upload_asp", "extension": ".asp", "description": "Classic ASP script — executes on IIS"},
+    {"id": "upload_aspx", "extension": ".aspx", "description": "ASP.NET page — executes on IIS"},
+    {"id": "upload_svg", "extension": ".svg", "description": "SVG can carry embedded <script> — stored XSS vector when served inline"},
+    {"id": "upload_html", "extension": ".html", "description": "HTML upload — stored XSS vector when served same-origin"}
+  ],
+  "rejection_indicators": [
+    "not allowed", "not permitted", "invalid file", "invalid extension",
+    "file type", "not supported", "rejected", "forbidden extension",
+    "disallowed", "unsupported file"
+  ]
+}

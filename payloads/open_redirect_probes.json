@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "description": "Benign open-redirect canary URLs. Each points at an RFC 2606-safe .invalid domain that VortexDAST controls no infrastructure for and never resolves — only the Location header or page body is inspected, nothing is fetched from the canary host.",
+    "safe": true
+  },
+  "redirect_parameter_keywords": [
+    "url", "redirect", "redirect_uri", "redirect_url", "redirecturl",
+    "return", "return_url", "returnurl", "return_to", "returnto",
+    "next", "continue", "dest", "destination", "target", "forward",
+    "out", "view", "goto", "callback", "checkout_url", "success_url",
+    "failure_url", "login_url", "logout_url", "r", "u", "to"
+  ],
+  "canary_probes": [
+    {
+      "id": "or_absolute",
+      "value": "https://vortexdast-redirect-canary.invalid/",
+      "description": "Plain absolute external URL"
+    },
+    {
+      "id": "or_protocol_relative",
+      "value": "//vortexdast-redirect-canary.invalid/",
+      "description": "Protocol-relative URL — bypasses a naive 'starts with http' allowlist"
+    },
+    {
+      "id": "or_backslash",
+      "value": "/\\vortexdast-redirect-canary.invalid/",
+      "description": "Leading backslash — some URL parsers normalise '\\' to '/' before a same-host check runs"
+    }
+  ]
+}

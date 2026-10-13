@@ -206,6 +206,23 @@ class TestHTMLParser:
         assert page.forms == []
         assert page.links == []
 
+    def test_file_input_kept_as_file_field(self) -> None:
+        """
+        A <input type="file"> must survive extraction (field_type="file") —
+        modules/file_upload_check.py needs it to find upload forms at all.
+        Submit/button/reset/image inputs remain excluded.
+        """
+        html = (
+            '<form action="/upload" method="POST" enctype="multipart/form-data">'
+            '<input type="file" name="avatar">'
+            '<input type="submit" value="Go">'
+            "</form>"
+        )
+        page = self.parser.parse(html, self.base_url)
+        field_names = [f.name for f in page.forms[0].fields]
+        assert field_names == ["avatar"]
+        assert page.forms[0].fields[0].field_type == "file"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ScopeGuard tests

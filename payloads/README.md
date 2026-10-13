@@ -4,10 +4,15 @@ Every scanner module loads its probes from a JSON file in this directory. Keepin
 payloads as data (not code) means they can be audited, extended, or swapped per
 engagement without touching the module logic.
 
-All probe sets are **benign by design**: they are built to *reveal* a weakness
+Most probe sets are **benign by design**: they are built to *reveal* a weakness
 (trigger an error, reflect a marker, flip query logic) without carrying a
-destructive action (no `DROP`, no OS command execution, no `$out`/`$where` code,
-no file writes).
+destructive action (no `DROP`, no `$out`/`$where` code). Two sets are a
+deliberate, narrower exception — proving their vuln class is inherently
+impossible without doing the minimum version of the thing being tested for:
+`command_injection_probes.json` runs a real OS command, and
+`file_upload_probes.json` really uploads a file. Both keep it to the
+non-destructive minimum (read-only commands only; an inert, clearly-marked
+text body only, never executable content) — see their own `meta.description`.
 
 | File | Used by | Purpose | Notes on false positives |
 |------|---------|---------|--------------------------|
@@ -21,6 +26,9 @@ no file writes).
 | `common_params.json` | `param_fuzzer` | Hidden-parameter name wordlist | Second baseline measures natural page jitter |
 | `tech_signatures.json` | `tech_detect` | Header / body / JS fingerprints | — |
 | `access_control.json` | `access_control_check` | Sensitive-path patterns, login indicators, IDOR param names | Sensitive-path gating keeps public pages from flagging |
+| `command_injection_probes.json` | `command_injection_check` | Separator + harmless-command probes (output markers + time-based) | Output hit needs every marker absent from baseline; time-based needs threshold + reproduction |
+| `open_redirect_probes.json` | `open_redirect_check` | Redirect-parameter keywords + off-site `.invalid` canary URLs | Confirmed signal matches the `Location` header's parsed host, not a substring |
+| `file_upload_probes.json` | `file_upload_check` | Dangerous extensions + rejection-indicator strings | Upload content is always inert, uniquely-marked text — never executable |
 
 ## Schema conventions
 

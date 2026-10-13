@@ -17,6 +17,10 @@ from .nosql_check import NoSQLCheckModule
 from .tech_detect import TechDetectModule
 from .template_injection import TemplateInjectionModule
 from .transport_check import TransportCheckModule
+from .command_injection_check import CommandInjectionCheckModule
+from .open_redirect_check import OpenRedirectCheckModule
+from .cors_check import CORSCheckModule
+from .file_upload_check import FileUploadCheckModule
 
 __all__ = [
     "AccessControlCheckModule",
@@ -36,4 +40,8 @@ __all__ = [
     "TechDetectModule",
     "TemplateInjectionModule",
     "TransportCheckModule",
+    "CommandInjectionCheckModule",
+    "OpenRedirectCheckModule",
+    "CORSCheckModule",
+    "FileUploadCheckModule",
 ]

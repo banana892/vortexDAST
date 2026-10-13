@@ -1,6 +1,6 @@
 # VortexDAST — Implementation Roadmap
 
-**Last updated:** 2026-10-13
+**Last updated:** 2026-10-14
 
 This is the plan of record for VortexDAST. It supersedes the earlier
 phase-based improvement roadmap and the old `docs/REMAINING_WORK.md` digest.
@@ -459,9 +459,55 @@ Ordered by impact; several are now *resolved by the plan above*.
    class genuinely needed a request body rather than a query-param
    substitution (`_send_xxe_probe`/`_render_xxe_payload`). Runs even
    against a target with no query parameters at all.
-5. **Missing vuln classes** — command injection, open redirect, XXE, CORS,
-   file-upload. Largely **covered by Phase B** (nuclei templates); native
-   modules optional afterwards.
+5. **Missing vuln classes** — ✅ *native modules shipped for all four.*
+   XXE was already covered by Phase B (nuclei templates) plus the dedicated
+   blind-XXE OOB probe in Phase C; the remaining four each got their own
+   module:
+   - `modules/command_injection_check.py` — fuzzes every GET/link/POST
+     parameter (no name-gating, unlike SSRF/open-redirect — a shell
+     metacharacter can land in any parameter) with five separator styles
+     (`;`, `|`, `&&`, backtick, `$()`) chained onto a harmless command.
+     Output-based probes (`id`/`ver`) require *every* marker regex to match
+     the fuzzed response and *none* to already match the baseline — `HIGH`/
+     `FIRM`. Time-based blind probes (`sleep`/`ping`) reuse `sqli_check`'s
+     exact threshold-plus-reproduction machinery verbatim. Only read-only,
+     non-destructive commands are ever sent.
+   - `modules/open_redirect_check.py` — name-gated like SSRF (`url`,
+     `next`, `redirect_uri`, …), swaps the value for a benign off-site
+     `.invalid` canary (plus one bypass variant built per-endpoint from its
+     own host — the userinfo `@` trick) with `allow_redirects=False`. A
+     `Location` header whose host is the canary is `CERTAIN`/`MEDIUM`
+     (CVSS 6.1 — the textbook open-redirect vector already documented in
+     `core/cvss.py`'s own docstring example); a canary URL merely
+     pattern-matched inside a meta-refresh/JS redirect in the body (never
+     executed) is a weaker `TENTATIVE`/`LOW` fallback.
+   - `modules/cors_check.py` — once per distinct origin+path (no param
+     fuzzing needed), sends a GET with a random attacker `Origin` and with
+     the literal `"null"` origin. `Access-Control-Allow-Origin` reflecting
+     either (or `"*"`) is a misconfiguration; paired with
+     `Access-Control-Allow-Credentials: true` it's `HIGH`/`CERTAIN` (full
+     credentialed cross-origin read); without credentials it's
+     `MEDIUM`/`TENTATIVE` (often an intentional public API, left for a
+     human to judge).
+   - `modules/file_upload_check.py` — every `multipart/form-data` form
+     with a file input gets a short, uniquely-marked, inert text upload
+     under each of a handful of dangerous extensions (`.php`, `.jsp`,
+     `.asp`, `.aspx`, `.svg`, `.html`) with a spoofed `image/jpeg`
+     Content-Type. Accepted (no rejection string in the response) is
+     `MEDIUM`/`TENTATIVE`; if the response also reveals a path to the
+     stored file and re-fetching it returns our own marker text, that's
+     upgraded to `HIGH`/`FIRM` — confirmed stored and retrievable.
+     Execution is never attempted.
+   - **Bugfix found while smoke-testing file_upload_check end-to-end**:
+     `core/parser.py`'s `_extract_field` was unconditionally dropping every
+     `<input type="file">` — reasonable when nothing looked for one, but it
+     meant the crawler never told any module an upload form even existed.
+     Fixed to keep it as `field_type="file"` (empty `default_value`, since
+     a file input carries no literal value); only `submit`/`button`/
+     `reset`/`image` remain excluded.
+   - All four are auto-discovered by `scanner.py`'s existing
+     `MODULE_REGISTRY` machinery with zero wiring changes, same as every
+     other module.
 6. **Shallow detectors** — ✅ *time-based blind SQLi resolved.* `sqli_check`
    now runs a dedicated time-based heuristic (GET params and POST/form
    fields) alongside its existing error-based and boolean-blind checks:
@@ -506,8 +552,9 @@ Ordered by impact; several are now *resolved by the plan above*.
 
 ## 6. Already shipped (core)
 
-- Concurrent BFS crawler, scope guard, HTML/form/param parser.
-- 13 auto-discovered scanner modules; thread-safe `Requester` with token-bucket
+- Concurrent BFS crawler, scope guard, HTML/form/param parser (including
+  file-upload `<input>`s).
+- 17 auto-discovered scanner modules; thread-safe `Requester` with token-bucket
   rate limiting and 429 auto-throttle.
 - Reporting: terminal (themed), JSON, HTML, Markdown, SARIF 2.1.0; CVSS v3.1;
   dedup; suppression rules; severity/confidence filtering; exit codes.
@@ -677,3 +724,22 @@ Ordered by impact; several are now *resolved by the plan above*.
   with a `<xml body>` placeholder in place of a parameter name. Known
   limit: only a bare `application/xml` POST is tried, not a SOAP envelope
   or other XML delivery shape.
+- 2026-10-14 — §5 item 5 "missing vuln classes" closed: four new native
+  modules (`command_injection_check`, `open_redirect_check`, `cors_check`,
+  `file_upload_check`), auto-discovered by the existing `MODULE_REGISTRY`
+  machinery with no wiring changes. `command_injection_check` reuses
+  `sqli_check`'s time-based-blind threshold-plus-reproduction machinery
+  verbatim for its blind probes, plus an output-marker check requiring
+  every marker regex to match the fuzzed response and none to match the
+  baseline. `open_redirect_check` is name-gated like `ssrf_check` and
+  confirms via the `Location` header's parsed host (CVSS 6.1, the vector
+  already documented in `core/cvss.py`'s own docstring example). `cors_check`
+  runs once per origin+path, testing a random attacker `Origin` and the
+  literal `"null"` origin. `file_upload_check` uploads a short,
+  uniquely-marked, inert text body under dangerous extensions with a
+  spoofed image Content-Type, upgrading to confirmed/`FIRM` when the
+  response reveals a retrievable stored-file path. While smoke-testing the
+  last one end-to-end, found and fixed a real bug it exposed:
+  `core/parser.py`'s `_extract_field` was unconditionally dropping every
+  `<input type="file">`, so no module could ever have found an upload form
+  at all — fixed to keep it as `field_type="file"`.

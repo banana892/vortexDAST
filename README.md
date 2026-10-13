@@ -25,7 +25,7 @@ between what runs today and what is planned — see
 
 | Area | State |
 |------|-------|
-| Static crawl + 13 scanner modules (XSS, SQLi, NoSQLi, SSTI, traversal, SSRF, CSRF, access-control, headers, transport, dir/param/tech recon) | ✅ Shipped |
+| Static crawl + 17 scanner modules (XSS, SQLi, NoSQLi, SSTI, traversal, SSRF, command injection, open redirect, CORS, file upload, CSRF, access-control, headers, transport, dir/param/tech recon) | ✅ Shipped |
 | Reporting: terminal, JSON, HTML, Markdown, SARIF 2.1.0; CVSS v3.1 | ✅ Shipped |
 | REST API mode, CI/CD exit codes, webhook notifications | ✅ Shipped |
 | Host-scoped TCP port scan + explicit CIDR subnet sweep | ✅ Shipped (opt-in) |

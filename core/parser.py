@@ -310,7 +310,9 @@ class HTMLParser:
         input_type = str(tag.get("type", "text")).strip().lower()
 
         # Skip non-data input types that are not useful injection vectors.
-        if input_type in {"submit", "button", "reset", "image", "file"}:
+        # "file" is kept (field_type="file", no meaningful default_value) —
+        # modules/file_upload_check.py needs it to find upload forms at all.
+        if input_type in {"submit", "button", "reset", "image"}:
             return None
 
         value = str(tag.get("value", "")).strip()
