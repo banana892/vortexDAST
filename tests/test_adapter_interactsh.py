@@ -78,9 +78,10 @@ def fake_client_on_path(tmp_path, monkeypatch):
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
-    """Target stand-in: records every request's query params, answers 200."""
+    """Target stand-in: records every GET's query params and every POST's body, answers 200."""
 
     seen: list
+    seen_posts: list
 
     def log_message(self, *a):
         pass
@@ -90,17 +91,25 @@ class _RecordingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8", errors="replace")
+        self.seen_posts.append({"content_type": self.headers.get("Content-Type"), "body": body})
+        self.send_response(200)
+        self.end_headers()
+
 
 @pytest.fixture
 def recording_target():
-    """A tiny local HTTP server; yields (base_url, seen_requests_list)."""
+    """A tiny local HTTP server; yields (base_url, seen_gets, seen_posts)."""
     seen: list = []
-    handler = type("Handler", (_RecordingHandler,), {"seen": seen})
+    seen_posts: list = []
+    handler = type("Handler", (_RecordingHandler,), {"seen": seen, "seen_posts": seen_posts})
     server = HTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}", seen
+        yield f"http://127.0.0.1:{server.server_port}", seen, seen_posts
     finally:
         server.shutdown()
 
@@ -191,6 +200,7 @@ class TestParse:
             ("rce", Severity.CRITICAL),
             ("sqli_mssql", Severity.CRITICAL),
             ("sqli_oracle", Severity.CRITICAL),
+            ("xxe", Severity.CRITICAL),
         ],
     )
     def test_each_vuln_kind_maps_to_a_distinct_finding(self, kind, expected_severity):
@@ -201,6 +211,15 @@ class TestParse:
         assert len(findings) == 1
         assert findings[0].severity == expected_severity
         assert findings[0].extra["vuln_class"] == kind
+
+    def test_xxe_finding_has_no_real_parameter(self):
+        """XXE has no query parameter at all — the <xml body> placeholder shows up instead."""
+        adapter = InteractshAdapter()
+        adapter._target = "http://app.local/api"
+        adapter._domain_to_combo = {"fakeid0": ("<xml body>", "xxe")}
+        findings = adapter.parse('{"protocol":"http","unique-id":"fakeid0"}\n')
+        assert len(findings) == 1
+        assert findings[0].parameter == "<xml body>"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -215,7 +234,7 @@ class TestRun:
         # Real OOB callbacks are async, hence the adapter's grace period —
         # shrink it here so the test doesn't pay that wait for no reason.
         monkeypatch.setattr("adapters.interactsh_adapter._SETTLE_SECONDS", 1.0)
-        base, seen = recording_target
+        base, seen, seen_posts = recording_target
         adapter = InteractshAdapter()
         target = f"{base}/?callback=orig&name=bob"
         findings = adapter.run(target, ScanContext(tool_timeout=30))
@@ -225,7 +244,7 @@ class TestRun:
         assert findings[0].url == target
         assert findings[0].extra["vuln_class"] == "ssrf"
 
-        # One probe per (parameter, payload-spec) combo: 2 params × 5 specs
+        # One GET per (parameter, payload-spec) combo: 2 params × 5 specs
         # (ssrf, 2×rce, 2×sqli) = 10 requests. Only the first combo built for
         # 'callback' uses the plain-URL (ssrf) payload, so exactly one
         # request carries an interactsh-looking URL in 'callback' while
@@ -235,13 +254,26 @@ class TestRun:
         assert len(callback_probes) == 1
         assert callback_probes[0]["name"] == ["bob"]
 
-    def test_no_params_returns_empty_without_starting_client(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(
-            "subprocess.Popen", lambda *a, **k: calls.append(a) or pytest.fail("should not start")
-        )
-        assert InteractshAdapter().run("http://app.local/", ScanContext()) == []
-        assert calls == []
+        # Plus exactly one XXE POST, unrelated to either query parameter.
+        assert len(seen_posts) == 1
+        assert seen_posts[0]["content_type"] == "application/xml"
+        assert "<!ENTITY xxe SYSTEM \"http://fakeid" in seen_posts[0]["body"]
+
+    def test_no_params_still_runs_the_xxe_probe(
+        self, fake_client_on_path, recording_target, monkeypatch
+    ):
+        """No query parameters at all — only the parameter-independent XXE probe fires."""
+        monkeypatch.setattr("adapters.interactsh_adapter._SETTLE_SECONDS", 1.0)
+        base, seen, seen_posts = recording_target
+        adapter = InteractshAdapter()
+        findings = adapter.run(base + "/", ScanContext(tool_timeout=30))
+
+        assert seen == []  # no GET probes — nothing to substitute into
+        assert len(seen_posts) == 1
+        assert seen_posts[0]["content_type"] == "application/xml"
+        assert len(findings) == 1
+        assert findings[0].extra["vuln_class"] == "xxe"
+        assert findings[0].parameter == "<xml body>"
 
     def test_absent_binary_skips_cleanly(self, monkeypatch):
         monkeypatch.setattr(InteractshAdapter, "is_available", lambda self: False)

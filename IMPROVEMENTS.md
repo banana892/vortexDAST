@@ -163,24 +163,34 @@ the seed URL — see Phase E's "full data-chaining," now shipped.
    reaches sqlmap only as an HTTP JSON value, never argv/shell, so there's no
    command-injection surface at all here. Requires `sqlmapapi` on `PATH`
    (bundled with sqlmap; a wrapper script is enough — see Contributing).
-5. **interactsh** — ✅ *shipped, now covering SSRF + RCE + SQLi.*
-   `adapters/interactsh_adapter.py` drives `interactsh-client`, asking it to
-   generate one unique correlation domain **per (query parameter, payload)
-   combination** on the target (`-n`), substitutes each rendered payload into
-   its one parameter (others untouched), waits out a short grace period, then
-   reads back any DNS/HTTP callback (`-json -o`) and attributes it to the
-   exact parameter *and* vulnerability class that caused it. Five payload
-   specs run per parameter: a plain callback URL (blind SSRF), two OS
-   command-injection shapes (`; nslookup <domain> #` and `` `nslookup
-   <domain>` ``, confirming blind RCE), and two DBMS-specific blind-SQLi OOB
-   payloads (MSSQL `xp_dirtree`, Oracle `UTL_INADDR.get_host_address`) —
-   closing most of the §5 item 4 OAST gap for the one seed URL each adapter
-   currently gets. Total probes are capped (`_MAX_PROBES`) alongside the
-   existing per-parameter cap, since 5 payloads/param multiplies request
-   volume. A target with no query parameters is skipped without starting the
-   client (nothing to probe). **Still open:** blind XXE needs an XML request
-   body, not a query-param substitution — a different delivery mechanism
-   from everything else this adapter does, left for a follow-up.
+5. **interactsh** — ✅ *shipped, now covering SSRF + RCE + SQLi + XXE —
+   §5 item 4's OAST gap fully closed.* `adapters/interactsh_adapter.py`
+   drives `interactsh-client`, asking it to generate one unique correlation
+   domain **per (query parameter, payload) combination** on the target
+   **plus one more, always, for a dedicated XXE probe** (`-n`), substitutes
+   each rendered payload into its one parameter (others untouched), waits
+   out a short grace period, then reads back any DNS/HTTP callback
+   (`-json -o`) and attributes it to the exact parameter *and*
+   vulnerability class that caused it. Five payload specs run per
+   parameter: a plain callback URL (blind SSRF), two OS command-injection
+   shapes (`; nslookup <domain> #` and `` `nslookup <domain>` ``,
+   confirming blind RCE), and two DBMS-specific blind-SQLi OOB payloads
+   (MSSQL `xp_dirtree`, Oracle `UTL_INADDR.get_host_address`) — for the one
+   seed URL each adapter currently gets. Total probes are capped
+   (`_MAX_PROBES`) alongside the existing per-parameter cap, since 5
+   payloads/param multiplies request volume. A target with no query
+   parameters skips the per-parameter probes entirely (nothing to
+   substitute into), but the client still starts — **blind XXE needs no
+   query parameter at all**: it's a dedicated `_send_xxe_probe` that POSTs
+   a crafted external-entity XML document (`_render_xxe_payload`, bare
+   `application/xml`) straight to the target's own URL, confirmed by the
+   same DNS/HTTP callback mechanism as everything else here, surfaced with
+   a `<xml body>` placeholder in place of a parameter name since there
+   isn't one. **Known limit:** only a bare `application/xml` POST is
+   tried — not a SOAP envelope, not a multipart/XML part, and the target's
+   existing query parameters (if any) aren't re-sent alongside the body;
+   left for a follow-up if a real target's XML endpoint needs a different
+   shape to parse the body at all.
 
 ### Phase D — Our own web-app depth (unique value, not outsourced)
 These are the things no external tool gives us and that define VortexDAST's
@@ -400,11 +410,14 @@ Ordered by impact; several are now *resolved by the plan above*.
    `--dynamic` JSON requests and imported OpenAPI/Swagger/Postman specs
    both feed `sqli_check`/`nosql_check`/`xss_check`'s JSON-leaf and
    REST-path-segment fuzzing (`core/json_fuzz.py`).
-4. **No OAST** — blind SSRF/SQLi/RCE/XXE undetectable. **✅ Blind SSRF, SQLi
-   (MSSQL/Oracle) and RCE resolved by Phase C** (`interactsh` adapter, GET
-   query parameters). Blind XXE still has no OOB confirmation path — it
-   needs an XML request body rather than a query-param substitution, a
-   different delivery mechanism from this adapter's other four payloads.
+4. **No OAST** — ✅ *fully resolved by Phase C.* Blind SSRF/RCE/SQLi
+   (MSSQL/Oracle) confirmed via `interactsh`'s GET query-parameter
+   substitution; blind XXE confirmed via the same adapter's dedicated,
+   parameter-independent probe — a bare `application/xml` POST of a
+   crafted external-entity document straight to the target, since this
+   class genuinely needed a request body rather than a query-param
+   substitution (`_send_xxe_probe`/`_render_xxe_payload`). Runs even
+   against a target with no query parameters at all.
 5. **Missing vuln classes** — command injection, open redirect, XXE, CORS,
    file-upload. Largely **covered by Phase B** (nuclei templates); native
    modules optional afterwards.
@@ -587,3 +600,14 @@ Ordered by impact; several are now *resolved by the plan above*.
   input only — no URL fetch, no well-known-path auto-discovery. All three
   "API testing" sub-items (discovery, fuzzing, spec import) are now
   shipped.
+- 2026-10-13 — Blind XXE shipped, closing §5 item 4's OAST gap
+  completely: `interactsh_adapter.py` gained a dedicated,
+  parameter-independent probe (`_send_xxe_probe`/`_render_xxe_payload`)
+  that POSTs a crafted external-entity XML document (bare
+  `application/xml`) straight to the target's own URL — unlike the
+  existing SSRF/RCE/SQLi probes, it needs no query parameter and so now
+  always runs, even against a target with none. Confirmed via the same
+  DNS/HTTP OOB callback mechanism as the other three classes; surfaced
+  with a `<xml body>` placeholder in place of a parameter name. Known
+  limit: only a bare `application/xml` POST is tried, not a SOAP envelope
+  or other XML delivery shape.

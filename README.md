@@ -31,7 +31,7 @@ between what runs today and what is planned — see
 | Host-scoped TCP port scan + explicit CIDR subnet sweep | ✅ Shipped (opt-in) |
 | Form-login auth: CSRF harvesting, multi-step/MFA (TOTP), session recovery | ✅ Shipped |
 | **Tool orchestration** — 9 adapters: nuclei, nmap, httpx, ffuf, sqlmap, interactsh, nikto, testssl.sh, subfinder (`--tools`) | ✅ Shipped (opt-in) |
-| **Out-of-band (OAST)** testing for blind SSRF, RCE and SQLi (via interactsh) | ✅ Shipped (opt-in) |
+| **Out-of-band (OAST)** testing for blind SSRF, RCE, SQLi and XXE (via interactsh) | ✅ Shipped (opt-in) |
 | **JavaScript / SPA rendering** (`--dynamic`, headless Chromium) | ✅ Shipped (opt-in) |
 | **JSON API fuzzing** — captures `fetch`/XHR calls during `--dynamic` crawling and fuzzes their (nested) bodies + REST path segments | ✅ Shipped (opt-in, via `--dynamic`) |
 | **OpenAPI/Swagger/Postman spec import** (`--openapi`, `--postman`) | ✅ Shipped (opt-in) |
@@ -123,7 +123,7 @@ vortex -u https://app.local --tools nuclei        # add nuclei's template checks
 vortex -u https://app.local --tools nmap,httpx    # recon: ports + live HTTP
 vortex -u https://app.local --tools ffuf --ffuf-wordlist big.txt  # content discovery
 vortex -u https://app.local --tools sqlmap        # confirm/exploit SQLi leads
-vortex -u https://app.local --tools interactsh    # confirm blind SSRF/RCE/SQLi via OOB callback
+vortex -u https://app.local --tools interactsh    # confirm blind SSRF/RCE/SQLi/XXE via OOB callback
 vortex -u https://app.local --tools nikto         # web-server misconfig / known-file scan
 vortex -u https://app.local --tools testssl       # deep TLS/cipher/cert analysis
 vortex -u https://app.local --tools subfinder,httpx  # subdomains + which are live

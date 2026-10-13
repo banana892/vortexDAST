@@ -7,12 +7,12 @@ an attacker-controlled domain, per the IMPROVEMENTS.md Phase C design.
 
 VortexDAST's own heuristic checks are reflection-based: ``ssrf_check`` only
 flags SSRF when the response *echoes* evidence of an internal fetch, and
-there is no blind-RCE/blind-SQLi detector at all (IMPROVEMENTS.md §5 items 4
-and 6). Many real vulnerabilities are blind — the server acts on the
-attacker's payload but never reflects anything back. This adapter confirms
-three vulnerability classes that way, for the one target URL it's given (the
-usual per-adapter scope; see IMPROVEMENTS.md's "known follow-ups" on full
-data-chaining):
+there is no blind-RCE/blind-SQLi/blind-XXE detector at all (IMPROVEMENTS.md
+§5 items 4 and 6). Many real vulnerabilities are blind — the server acts on
+the attacker's payload but never reflects anything back. This adapter
+confirms four vulnerability classes that way, for the one target URL it's
+given (the usual per-adapter scope; see IMPROVEMENTS.md's "known
+follow-ups" on full data-chaining):
 
 - **SSRF** — parameter value set to our own URL.
 - **OS command injection (RCE)** — parameter value set to a shell
@@ -20,33 +20,46 @@ data-chaining):
 - **Blind SQL injection** — parameter value set to a DBMS-specific
   out-of-band payload (MSSQL ``xp_dirtree``, Oracle ``UTL_INADDR``) that
   forces a DNS lookup if the query is actually executed.
+- **Blind XXE** — a dedicated, parameter-independent probe: the target's
+  own URL is POSTed a crafted XML document declaring an external entity
+  that points at our domain. A compliant-but-unhardened XML parser resolves
+  that entity server-side, confirming it even though nothing is reflected
+  back and no query parameter is involved at all.
 
-Mechanism, generalised across all three:
+Mechanism, generalised across the three *parameter-substitution* classes
+(SSRF/RCE/SQLi):
 
 1. Start ``interactsh-client``, asking it to generate one unique correlation
-   domain **per (query parameter, payload) combination** on the target
-   (``-n <count>``) and write them to a local file (``-ps``/``-psf``) — so a
-   later callback can be attributed back to the exact parameter *and*
-   vulnerability class that caused it.
+   domain **per (query parameter, payload) combination** on the target,
+   **plus one more for the XXE probe** (``-n <count>``), and write them to a
+   local file (``-ps``/``-psf``) — so a later callback can be attributed
+   back to the exact parameter *and* vulnerability class that caused it.
 2. For each combination, issue one GET with that parameter's value replaced
    by the corresponding payload rendered against its own domain (every other
-   parameter left untouched).
+   parameter left untouched). Separately, issue one POST of the rendered
+   XXE document to the target itself — unrelated to any query parameter.
 3. Give the server a short grace period to make any outbound call, then read
    whatever interactions ``interactsh-client`` logged (``-json -o <file>``) —
    a DNS lookup alone already proves the server tried to resolve our domain;
    a completed HTTP request proves it went further.
 4. Map each distinct domain that fired into one Finding, attributed to its
-   parameter and vulnerability class, and tear the client down.
+   parameter (or, for XXE, a ``<xml body>`` placeholder — there is no
+   parameter) and vulnerability class, and tear the client down.
 
-Target URLs with no query parameters have nothing to substitute into, so
-:meth:`run` returns no findings for them without starting the client at all —
-not a failure, just nothing to test.
+The XXE probe always runs, even against a target with no query parameters
+at all (it needs none) — the client now starts for *every* target. The
+SSRF/RCE/SQLi parameter-substitution probes simply have nothing to
+contribute when there are no query parameters, so only the XXE domain gets
+requested and probed in that case.
 
-shortcut: only query parameters are probed (no POST body/form fields, no
-path segments, no XML body for XXE); upgrade when the orchestrator passes
+shortcut: only query parameters are probed for SSRF/RCE/SQLi (no POST
+body/form fields, no path segments); upgrade when the orchestrator passes
 adapters the full crawled attack surface instead of one seed URL (Phase E
-data-chaining). XXE in particular needs a request body, not a query-param
-substitution, so it isn't covered by this mechanism at all yet.
+data-chaining). The XXE probe only tries a bare ``application/xml`` POST of
+the target's own URL — not a SOAP envelope, not a multipart/XML part, and
+not the URL's existing query parameters re-sent alongside the XML body;
+upgrade if a real target's XML endpoint needs a different shape to parse
+the body at all.
 
 Licence note
 ------------
@@ -90,6 +103,11 @@ _CVSS_VECTOR_SSRF_CONFIRMED = build_vector(
     AV="N", AC="L", PR="N", UI="N", S="C", C="H", I="H", A="N"
 )
 _CVSS_SCORE_SSRF_CONFIRMED: float = cvss_calc(_CVSS_VECTOR_SSRF_CONFIRMED)  # 9.6
+# Blind XXE confirmed via external-entity OOB resolution shares this exact
+# vector: the impact actually *proven* by this probe is the XML parser
+# making a server-side fetch on our behalf — the same scope-changed
+# SSRF-shaped reach, not (yet) confirmed local-file disclosure, which this
+# bare-entity payload doesn't attempt to exfiltrate.
 
 # Confirmed blind OS command injection: the server actually ran our
 # payload, reaching the underlying host — Scope:Changed, full C/I/A.
@@ -131,6 +149,25 @@ _PROBE_SPECS: List[_ProbeSpec] = [
         lambda d: f"' UNION SELECT UTL_INADDR.get_host_address('{d}') FROM dual--",
     ),
 ]
+
+
+def _render_xxe_payload(domain: str) -> str:
+    """
+    A minimal external-entity XML document: ``&xxe;`` forces a compliant
+    parser to fetch ``domain`` to resolve it, with no file path or further
+    exploitation attempted — this probe only needs to prove the fetch
+    happens at all.
+    """
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<!DOCTYPE vortex [<!ENTITY xxe SYSTEM "http://{domain}/">]>'
+        "<vortex>&xxe;</vortex>"
+    )
+
+
+#: Finding.parameter placeholder for the XXE probe — it has no query
+#: parameter at all, the whole request body is the injection vector.
+_XXE_PARAM_LABEL = "<xml body>"
 
 #: Per-vulnerability-class finding content. ``description``/``payload_preview``
 #: are ``str.format`` templates filled in with the actual protocol/param/domain.
@@ -208,6 +245,32 @@ _VULN_META: Dict[str, Dict[str, Any]] = {
             "string concatenation."
         ),
     ),
+    "xxe": dict(
+        title_label="Blind XXE (XML External Entity)",
+        severity=Severity.CRITICAL,
+        cvss_vector=_CVSS_VECTOR_SSRF_CONFIRMED,
+        cvss_score=_CVSS_SCORE_SSRF_CONFIRMED,
+        payload_preview=(
+            '<!DOCTYPE vortex [<!ENTITY xxe SYSTEM "http://{domain}/">]>'
+            "<vortex>&xxe;</vortex>"
+        ),
+        description=(
+            "POSTing a crafted XML document containing an external-entity "
+            "declaration to this endpoint caused an outbound {protocols} "
+            "request to an attacker-controlled interactsh domain — "
+            "confirming the server's XML parser resolves external "
+            "entities, a classic blind XXE vulnerability. This probe only "
+            "proves the fetch happens; a parser that resolves external "
+            "entities can typically also be used to read local files or "
+            "reach internal network services."
+        ),
+        remediation=(
+            "Disable external entity resolution (DTDs) in the XML parser "
+            "— e.g. XMLConstants.FEATURE_SECURE_PROCESSING in Java, "
+            "libxml2's resolve_entities=False / LIBXML_NONET in Python/"
+            "PHP, or the parser's documented 'disallow DOCTYPE' setting."
+        ),
+    ),
 }
 
 #: Hard cap on parameters probed per run — bounds request volume against the
@@ -227,7 +290,7 @@ _PROBE_TIMEOUT = 10.0
 
 
 class InteractshAdapter(ToolAdapter):
-    """Drive interactsh-client to confirm blind SSRF via OOB callback."""
+    """Drive interactsh-client to confirm blind SSRF/RCE/SQLi/XXE via OOB callback."""
 
     name: str = "interactsh"
     binary: str = "interactsh-client"
@@ -235,8 +298,9 @@ class InteractshAdapter(ToolAdapter):
         "Out-of-band (OAST) interaction testing via interactsh-client. "
         "Substitutes a unique callback domain + payload into each query "
         "parameter and confirms blind SSRF, OS command injection and SQL "
-        "injection (MSSQL/Oracle) via a DNS/HTTP callback that reflection-"
-        "based checks can't see. Optional external tool."
+        "injection (MSSQL/Oracle), plus a dedicated parameter-independent "
+        "blind-XXE probe, via a DNS/HTTP callback that reflection-based "
+        "checks can't see. Optional external tool."
     )
     #: Startup + probing + settle time, all told.
     default_timeout: float = 90.0
@@ -307,9 +371,6 @@ class InteractshAdapter(ToolAdapter):
 
         self._target = target
         params = self._extract_params(target)
-        if not params:
-            logger.info("interactsh: '%s' has no query parameters to probe.", target)
-            return []
         # Bound total probes (params × payload specs) to _MAX_PROBES, then
         # apply the per-param cap on whatever's left.
         max_params_for_budget = max(1, _MAX_PROBES // len(_PROBE_SPECS))
@@ -317,10 +378,17 @@ class InteractshAdapter(ToolAdapter):
         combos: List[Tuple[str, _ProbeSpec]] = [
             (param, spec) for param in params for spec in _PROBE_SPECS
         ]
+        # The XXE probe needs no query parameter at all, so it always runs —
+        # one extra domain slot, independent of `combos`.
+        if not combos:
+            logger.info(
+                "interactsh: '%s' has no query parameters — only the XXE probe will run.",
+                target,
+            )
 
         deadline = time.monotonic() + min(self.default_timeout, ctx.tool_timeout)
         workdir = tempfile.mkdtemp(prefix="vortex-interactsh-")
-        self._n = len(combos)
+        self._n = len(combos) + 1
         self._payload_file = os.path.join(workdir, "payloads.txt")
         self._interactions_file = os.path.join(workdir, "interactions.jsonl")
 
@@ -345,6 +413,11 @@ class InteractshAdapter(ToolAdapter):
                     label = domain.split(".", 1)[0]
                     self._domain_to_combo[label] = (param, spec.kind)
                     self._send_probe(target, param, spec.render(domain))
+
+                xxe_domain = domains[len(combos)]
+                xxe_label = xxe_domain.split(".", 1)[0]
+                self._domain_to_combo[xxe_label] = (_XXE_PARAM_LABEL, "xxe")
+                self._send_xxe_probe(target, _render_xxe_payload(xxe_domain))
 
                 time.sleep(max(0.0, min(_SETTLE_SECONDS, deadline - time.monotonic())))
 
@@ -381,6 +454,19 @@ class InteractshAdapter(ToolAdapter):
             requests.get(probe_url, timeout=_PROBE_TIMEOUT)
         except requests.exceptions.RequestException as exc:
             logger.debug("interactsh probe request failed (ignored): %s", exc)
+
+    @staticmethod
+    def _send_xxe_probe(target: str, xml_body: str) -> None:
+        """POST ``xml_body`` straight to ``target`` — no query-param involved."""
+        try:
+            requests.post(
+                target,
+                data=xml_body.encode("utf-8"),
+                headers={"Content-Type": "application/xml"},
+                timeout=_PROBE_TIMEOUT,
+            )
+        except requests.exceptions.RequestException as exc:
+            logger.debug("interactsh XXE probe request failed (ignored): %s", exc)
 
     def _wait_for_payloads(self, deadline: float) -> List[str]:
         """Poll the payload file until it has one line per requested domain."""
