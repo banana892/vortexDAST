@@ -342,8 +342,28 @@ own quality:
     login config — covers the common case (one login form, two accounts);
     an app whose roles log in through genuinely different endpoints needs a
     follow-up.
-  - 🚧 *not done:* **OAuth2/OIDC** token flows — a different shape of work
-    from the form-login scaffold above and still needs its own design.
+  - ✅ *shipped:* **OAuth2/OIDC** token flows — `core/auth.py`'s
+    `OAuth2Authenticator` exchanges credentials for a bearer access token at
+    the authorization server's token endpoint (RFC 6749 §4.3/§4.4) and
+    attaches it as `Authorization: Bearer <token>` on the shared session.
+    Supports the two grants that complete in a single unattended HTTP call:
+    `password` (Resource Owner Password Credentials — a test account's own
+    username/password) and `client_credentials` (a service-level client id/
+    secret, no end-user account). Shares `FormLoginAuthenticator`'s
+    `login`/`is_session_valid`/`reauthenticate` shape, so it plugs into
+    `Requester.set_session_recovery` the same way — `is_session_valid`
+    returns `False` on a locally-tracked token-lifetime expiry or an
+    outright HTTP 401, and `reauthenticate` uses the `refresh_token` grant
+    when the authorization server issued one, falling back to the original
+    grant otherwise. New CLI flags: `--oauth2-token-url`,
+    `--oauth2-grant-type`, `--oauth2-client-id`, `--oauth2-client-secret`,
+    `--oauth2-username`, `--oauth2-password`, `--oauth2-scope` — mutually
+    exclusive with `--login-url`. **Known limit:** the interactive
+    `authorization_code` (+ PKCE) grant needs a real browser to complete a
+    login-page redirect — a different shape of work (driving
+    `core/dom_watcher.py`'s headless browser through that redirect) — and is
+    not implemented; OAuth2 also has no role-matrix (`--role2-*`)
+    equivalent yet, which remains form-login-only.
 
 ### Phase E — Tier-3 adapters + chaining polish
 - ~~ffuf~~ ✅ shipped early (curated-catalogue default wordlist, `-ac`
@@ -415,12 +435,15 @@ own quality:
 From assessing a real modern target (SPA + auth + API, on managed hosting).
 Ordered by impact; several are now *resolved by the plan above*.
 
-1. **Authenticated scanning** — ✅ *scaffolded, with follow-ups shipped.*
+1. **Authenticated scanning** — ✅ *all follow-ups shipped.*
    `core/auth.py` (`FormLoginAuthenticator`) + `Requester.set_session_recovery`
    give form login, CSRF-token harvesting, multi-step/MFA (incl. live TOTP),
    and transparent mid-scan re-auth (replaying every configured step with a
-   fresh code). `--role2-login-data` adds a role-matrix second identity (see
-   Phase D). OAuth2/OIDC remains open.
+   fresh code). `--role2-login-data` adds a role-matrix second identity, and
+   `core/auth.py` (`OAuth2Authenticator`) adds OAuth2/OIDC bearer-token auth
+   (`password`/`client_credentials` grants + refresh) — see Phase D. Only
+   the interactive `authorization_code` grant (needs a browser redirect)
+   remains open.
 2. **No JS/SPA rendering** — ✅ *resolved by Phase D* (`DomWatcher`,
    `--dynamic`). A thin static-only result is still possible if `--dynamic`
    is left off, but it's no longer the only option.
@@ -496,6 +519,8 @@ Ordered by impact; several are now *resolved by the plan above*.
   live RFC 6238 TOTP), + mid-scan session recovery that replays every step,
   + a role-matrix second identity (`--role2-login-data`) that
   `access_control_check` diffs against the primary session.
+- OAuth2/OIDC bearer-token authentication (`password`/`client_credentials`
+  grants + refresh-token recovery), as an alternative to form login.
 - Tool orchestration (Phases A + B + C + E, complete): `ToolAdapter`
   framework, `--tools` / `--no-tools` / `--tool-timeout` / `--list-tools`, 9
   adapters (nuclei, nmap, httpx, ffuf, sqlmap, interactsh, nikto,
@@ -620,6 +645,19 @@ Ordered by impact; several are now *resolved by the plan above*.
   input only — no URL fetch, no well-known-path auto-discovery. All three
   "API testing" sub-items (discovery, fuzzing, spec import) are now
   shipped.
+- 2026-10-14 — OAuth2/OIDC authentication shipped, closing the last open
+  item under "Authenticated scanning — follow-ups":
+  `core/auth.py`'s `OAuth2Authenticator` obtains a bearer access token from
+  the authorization server's token endpoint (`password` or
+  `client_credentials` grant) and attaches it to the shared session; it
+  shares `FormLoginAuthenticator`'s shape so it plugs into
+  `Requester.set_session_recovery` the same way, refreshing via the
+  `refresh_token` grant on local expiry or an HTTP 401. New flags:
+  `--oauth2-token-url`, `--oauth2-grant-type`, `--oauth2-client-id`,
+  `--oauth2-client-secret`, `--oauth2-username`, `--oauth2-password`,
+  `--oauth2-scope` (mutually exclusive with `--login-url`). The interactive
+  `authorization_code` (+ PKCE) grant, which needs a real browser redirect,
+  is not implemented.
 - 2026-10-14 — Role-matrix second identity shipped: `--role2-login-data`
   authenticates a second session through the same login mechanism, and
   `AccessControlCheckModule.set_role_requester()` wires it into Part 1's

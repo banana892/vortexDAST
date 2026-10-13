@@ -32,14 +32,27 @@ This module adds the two missing pieces:
   submission time (and again on every re-authentication), so a true
   authenticator-app-backed MFA flow can be scanned unattended — a fixed code
   would simply expire. A plain fixed code (e.g. a backup code) works too.
+* :class:`OAuth2Authenticator` — a second, independent strategy for targets
+  protected by OAuth2/OIDC instead of a session cookie: exchanges credentials
+  for a bearer access token at the authorization server's token endpoint and
+  attaches it to every request. Implements the two grants that complete in a
+  single unattended HTTP call — ``password`` (Resource Owner Password
+  Credentials, a test account's own username/password) and
+  ``client_credentials`` (a service-level client id/secret, no end-user
+  account) — plus token refresh. Same ``login``/``is_session_valid``/
+  ``reauthenticate`` shape as :class:`FormLoginAuthenticator`, so it plugs
+  into :meth:`Requester.set_session_recovery` the same way.
 
 Scope of this scaffold
 -----------------------
-Form-based login (GET or POST), CSRF-token harvesting, and two-step/MFA logins
-are implemented and tested. OAuth2/OIDC token flows and a multi-identity
-"role matrix" comparison are intentionally left as follow-ups — the class is
-structured so they slot in as additional strategies without touching the
-recovery plumbing.
+Form-based login (GET or POST), CSRF-token harvesting, two-step/MFA logins,
+and OAuth2/OIDC's password and client_credentials grants are implemented and
+tested. The interactive ``authorization_code`` (+ PKCE) grant needs a real
+browser to complete a login-page redirect — a different shape of work
+(driving `core/dom_watcher.py`'s headless browser through that redirect) —
+and is left as a follow-up. A multi-identity "role matrix" comparison for
+form logins is implemented in `modules/access_control_check.py`
+(`--role2-login-data`); OAuth2 has no role-matrix equivalent yet.
 """
 
 from __future__ import annotations
@@ -332,6 +345,137 @@ class FormLoginAuthenticator:
         """Re-run the login after a detected session loss."""
         logger.warning("auth: session lost — re-authenticating")
         return self.login(requester)
+
+
+class OAuth2Authenticator:
+    """
+    Authenticate a scan session against an OAuth2/OIDC-protected target by
+    obtaining a bearer access token from the authorization server's token
+    endpoint (RFC 6749 §4.3/§4.4) and attaching it to every request.
+
+    Supports the two grants that complete in a single unattended HTTP call —
+    the only kind a CLI scan can drive without a real browser:
+
+    * ``"password"`` — Resource Owner Password Credentials: a test account's
+      own ``username``/``password`` exchanged directly for a token.
+    * ``"client_credentials"`` — a service-level ``client_id``/
+      ``client_secret`` pair, no end-user account at all.
+
+    The interactive ``authorization_code`` (+ PKCE) grant needs a browser to
+    complete a login-page redirect and is not implemented here.
+
+    Parameters
+    ----------
+    token_url:
+        The authorization server's token endpoint (OIDC providers publish
+        this as ``token_endpoint`` in their ``.well-known/openid-configuration``
+        document; pass the resolved URL directly — no discovery is done here).
+    grant_type:
+        ``"password"`` or ``"client_credentials"``.
+    client_id:
+        OAuth2 client identifier.
+    client_secret:
+        OAuth2 client secret, if the client is confidential (omit for a
+        public client).
+    username / password:
+        Required for the ``"password"`` grant; ignored otherwise.
+    scope:
+        Optional space-separated scope string (e.g. ``"openid profile"``).
+    """
+
+    def __init__(
+        self,
+        token_url: str,
+        grant_type: str,
+        client_id: str,
+        *,
+        client_secret: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        scope: Optional[str] = None,
+    ) -> None:
+        if grant_type not in ("password", "client_credentials"):
+            raise ValueError(
+                f"unsupported OAuth2 grant_type {grant_type!r}; "
+                "use 'password' or 'client_credentials'"
+            )
+        if grant_type == "password" and not (username and password):
+            raise ValueError("the 'password' grant requires both username and password")
+        self.token_url = token_url
+        self.grant_type = grant_type
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.username = username
+        self.password = password
+        self.scope = scope
+        self._expires_at: Optional[float] = None
+        self._refresh_token: Optional[str] = None
+
+    def login(self, requester: "Requester") -> bool:
+        """Obtain an initial access token and attach it to ``requester``'s session."""
+        return self._request_token(requester, refresh=False)
+
+    def is_session_valid(self, resp: "requests.Response") -> bool:
+        """
+        Return ``False`` once the locally tracked token lifetime has elapsed,
+        or the resource server rejects the token outright (HTTP 401).
+        """
+        if resp.status_code == 401:
+            return False
+        if self._expires_at is not None and time.time() >= self._expires_at:
+            return False
+        return True
+
+    def reauthenticate(self, requester: "Requester") -> bool:
+        """Refresh the access token (or re-run the original grant) after expiry/rejection."""
+        logger.warning("auth: OAuth2 token expired/rejected — refreshing")
+        if self._refresh_token and self._request_token(requester, refresh=True):
+            return True
+        return self._request_token(requester, refresh=False)
+
+    def _request_token(self, requester: "Requester", *, refresh: bool) -> bool:
+        data: Dict[str, str] = {"client_id": self.client_id}
+        if self.client_secret:
+            data["client_secret"] = self.client_secret
+        if refresh and self._refresh_token:
+            data["grant_type"] = "refresh_token"
+            data["refresh_token"] = self._refresh_token
+        elif self.grant_type == "password":
+            data["grant_type"] = "password"
+            data["username"] = self.username or ""
+            data["password"] = self.password or ""
+        else:
+            data["grant_type"] = "client_credentials"
+        if self.scope:
+            data["scope"] = self.scope
+
+        resp, err = requester.post(self.token_url, data=data)
+        if err or resp is None or resp.status_code >= 400:
+            logger.error(
+                "auth: OAuth2 token request failed: %s",
+                err or f"HTTP {resp.status_code if resp else '?'}",
+            )
+            return False
+        try:
+            payload = resp.json()
+        except ValueError:
+            logger.error("auth: OAuth2 token endpoint did not return JSON")
+            return False
+
+        token = payload.get("access_token")
+        if not token:
+            logger.error("auth: OAuth2 token response missing 'access_token'")
+            return False
+
+        requester.session.headers["Authorization"] = f"Bearer {token}"
+        expires_in = payload.get("expires_in")
+        self._expires_at = time.time() + float(expires_in) if expires_in is not None else None
+        self._refresh_token = payload.get("refresh_token", self._refresh_token)
+        logger.info(
+            "auth: OAuth2 token acquired (%s grant%s)",
+            self.grant_type, ", refreshed" if refresh else "",
+        )
+        return True
 
 
 def parse_login_data(raw: str) -> Dict[str, str]:

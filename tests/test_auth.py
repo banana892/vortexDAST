@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,7 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from core.auth import FormLoginAuthenticator, parse_login_data, totp
+from core.auth import FormLoginAuthenticator, OAuth2Authenticator, parse_login_data, totp
 from core.requester import Requester
 
 
@@ -539,3 +540,227 @@ def test_reauthenticate_replays_both_steps_with_fresh_totp():
     finally:
         req.close()
         server.close()
+
+
+# ── OAuth2/OIDC ────────────────────────────────────────────────────────────────
+
+
+class _OAuth2Server:
+    """
+    POST /token:
+      grant_type=client_credentials (client_id/client_secret=cid/csecret)
+      grant_type=password (username/password=bob/pw)
+      grant_type=refresh_token (refresh_token=<last issued>)
+      -> 200 {"access_token": ..., "expires_in": N, "refresh_token": ...}
+         (a successful grant invalidates any previously issued access token,
+         so /protected proves which token is actually current)
+      -> 400 on a credential mismatch
+    GET /protected (needs "Authorization: Bearer <current access_token>"):
+      -> 200 "protected area" / 401 "unauthorized"
+    """
+
+    def __init__(self) -> None:
+        self.current_access_token: str | None = None
+        self.current_refresh_token: str | None = None
+        self.grant_counts: dict[str, int] = {}
+        self._lock = threading.Lock()
+        server = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def _json(self, code, payload):
+                data = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_POST(self):
+                if urlsplit(self.path).path != "/token":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                n = int(self.headers.get("Content-Length") or 0)
+                form = parse_qs(self.rfile.read(n).decode())
+                grant = (form.get("grant_type") or [None])[0]
+                with server._lock:
+                    server.grant_counts[grant] = server.grant_counts.get(grant, 0) + 1
+
+                    ok = False
+                    if grant == "client_credentials":
+                        ok = (
+                            form.get("client_id") == ["cid"]
+                            and form.get("client_secret") == ["csecret"]
+                        )
+                    elif grant == "password":
+                        ok = (
+                            form.get("username") == ["bob"]
+                            and form.get("password") == ["pw"]
+                        )
+                    elif grant == "refresh_token":
+                        ok = (form.get("refresh_token") or [None])[0] == server.current_refresh_token
+
+                    if not ok:
+                        self._json(400, {"error": "invalid_grant"})
+                        return
+
+                    server.current_access_token = secrets.token_hex(8)
+                    server.current_refresh_token = secrets.token_hex(8)
+                    self._json(
+                        200,
+                        {
+                            "access_token": server.current_access_token,
+                            "expires_in": 3600,
+                            "refresh_token": server.current_refresh_token,
+                        },
+                    )
+
+            def do_GET(self):
+                if urlsplit(self.path).path != "/protected":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                sent = self.headers.get("Authorization", "")
+                with server._lock:
+                    valid = server.current_access_token is not None and sent == f"Bearer {server.current_access_token}"
+                if valid:
+                    self._json(200, {"ok": True, "body": "protected area"})
+                else:
+                    self._json(401, {"error": "unauthorized"})
+
+            def log_message(self, *a):
+                pass
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._httpd.server_address[1]
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def base(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def close(self) -> None:
+        self._httpd.shutdown()
+
+
+@pytest.fixture
+def oauth2_server():
+    s = _OAuth2Server()
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+def test_oauth2_client_credentials_login_sets_bearer_and_unlocks_resource(oauth2_server):
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{oauth2_server.base}/token",
+            grant_type="client_credentials",
+            client_id="cid",
+            client_secret="csecret",
+        )
+        assert auth.login(req) is True
+        assert req.session.headers["Authorization"] == f"Bearer {oauth2_server.current_access_token}"
+        resp, err = req.get(f"{oauth2_server.base}/protected")
+        assert err is None
+        assert "protected area" in resp.text
+    finally:
+        req.close()
+
+
+def test_oauth2_password_grant_login_succeeds(oauth2_server):
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{oauth2_server.base}/token",
+            grant_type="password",
+            client_id="cid",
+            username="bob",
+            password="pw",
+        )
+        assert auth.login(req) is True
+        resp, _ = req.get(f"{oauth2_server.base}/protected")
+        assert "protected area" in resp.text
+    finally:
+        req.close()
+
+
+def test_oauth2_wrong_client_secret_login_fails(oauth2_server):
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{oauth2_server.base}/token",
+            grant_type="client_credentials",
+            client_id="cid",
+            client_secret="WRONG",
+        )
+        assert auth.login(req) is False
+    finally:
+        req.close()
+
+
+def test_oauth2_invalid_grant_type_rejected():
+    with pytest.raises(ValueError):
+        OAuth2Authenticator(
+            token_url="https://example.test/token",
+            grant_type="authorization_code",
+            client_id="cid",
+        )
+
+
+def test_oauth2_password_grant_requires_username_and_password():
+    with pytest.raises(ValueError):
+        OAuth2Authenticator(
+            token_url="https://example.test/token",
+            grant_type="password",
+            client_id="cid",
+        )
+
+
+def test_oauth2_unauthorized_response_marks_session_invalid(oauth2_server):
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{oauth2_server.base}/token",
+            grant_type="client_credentials",
+            client_id="cid",
+            client_secret="csecret",
+        )
+        auth.login(req)
+        # Corrupt the session's own bearer token, bypassing the authenticator,
+        # to simulate the resource server rejecting it.
+        req.session.headers["Authorization"] = "Bearer stale-or-revoked"
+        resp, _ = req.get(f"{oauth2_server.base}/protected")
+        assert resp.status_code == 401
+        assert auth.is_session_valid(resp) is False
+    finally:
+        req.close()
+
+
+def test_oauth2_session_recovery_refreshes_via_refresh_token(oauth2_server):
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{oauth2_server.base}/token",
+            grant_type="client_credentials",
+            client_id="cid",
+            client_secret="csecret",
+        )
+        assert auth.login(req) is True
+        req.set_session_recovery(auth.is_session_valid, lambda: auth.reauthenticate(req))
+
+        # Simulate expiry/rejection the way a real deployment would surface it.
+        req.session.headers["Authorization"] = "Bearer stale-or-revoked"
+        resp, err = req.get(f"{oauth2_server.base}/protected")
+
+        assert err is None
+        assert "protected area" in resp.text  # transparently recovered
+        assert oauth2_server.grant_counts.get("refresh_token") == 1
+        assert oauth2_server.grant_counts.get("client_credentials") == 1  # not re-run
+    finally:
+        req.close()

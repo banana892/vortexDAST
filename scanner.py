@@ -78,7 +78,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from core import crawl_cache
-from core.auth import FormLoginAuthenticator, parse_login_data
+from core.auth import FormLoginAuthenticator, OAuth2Authenticator, parse_login_data
 from core.crawler import CrawlResult, CrawledEndpoint, Crawler, ScopeGuard
 from core.dom_watcher import DomWatcher
 from core.spec_import import import_openapi_spec, import_postman_collection
@@ -953,6 +953,58 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Substring that marks a failed/rejected MFA code.",
     )
     parser.add_argument(
+        "--oauth2-token-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "OAuth2/OIDC token endpoint. The scanner exchanges credentials "
+            "here for a bearer access token and attaches it to every "
+            "request. Mutually exclusive with --login-url."
+        ),
+    )
+    parser.add_argument(
+        "--oauth2-grant-type",
+        choices=["password", "client_credentials"],
+        default="client_credentials",
+        help=(
+            "OAuth2 grant to use (default: client_credentials). 'password' "
+            "(Resource Owner Password Credentials) needs --oauth2-username/"
+            "--oauth2-password; 'client_credentials' needs only the client "
+            "id/secret. The interactive authorization_code grant (browser "
+            "redirect) is not supported."
+        ),
+    )
+    parser.add_argument(
+        "--oauth2-client-id",
+        default=None,
+        metavar="ID",
+        help="OAuth2 client identifier. Requires --oauth2-token-url.",
+    )
+    parser.add_argument(
+        "--oauth2-client-secret",
+        default=None,
+        metavar="SECRET",
+        help="OAuth2 client secret (omit for a public client).",
+    )
+    parser.add_argument(
+        "--oauth2-username",
+        default=None,
+        metavar="USER",
+        help="Resource-owner username, for --oauth2-grant-type password.",
+    )
+    parser.add_argument(
+        "--oauth2-password",
+        default=None,
+        metavar="PASS",
+        help="Resource-owner password, for --oauth2-grant-type password.",
+    )
+    parser.add_argument(
+        "--oauth2-scope",
+        default=None,
+        metavar="SCOPE",
+        help="Optional space-separated OAuth2 scope string (e.g. 'openid profile').",
+    )
+    parser.add_argument(
         "--role2-login-data",
         default=None,
         metavar="FIELDS",
@@ -1547,6 +1599,43 @@ def run_scan(args: argparse.Namespace) -> int:
     if getattr(args, "role2_login_data", None) and not getattr(args, "login_url", None):
         print("[ERROR] --role2-login-data requires --login-url.", file=sys.stderr)
         return 2
+    if getattr(args, "login_url", None) and getattr(args, "oauth2_token_url", None):
+        print("[ERROR] --login-url and --oauth2-token-url are mutually exclusive.", file=sys.stderr)
+        return 2
+    if getattr(args, "oauth2_token_url", None):
+        if not getattr(args, "oauth2_client_id", None):
+            print("[ERROR] --oauth2-token-url requires --oauth2-client-id.", file=sys.stderr)
+            return 2
+        try:
+            oauth2_authenticator = OAuth2Authenticator(
+                token_url=args.oauth2_token_url,
+                grant_type=args.oauth2_grant_type,
+                client_id=args.oauth2_client_id,
+                client_secret=args.oauth2_client_secret,
+                username=args.oauth2_username,
+                password=args.oauth2_password,
+                scope=args.oauth2_scope,
+            )
+        except ValueError as exc:
+            print(f"[ERROR] invalid OAuth2 configuration: {exc}", file=sys.stderr)
+            return 2
+        if not oauth2_authenticator.login(requester):
+            ui.status(
+                console, theme, "error",
+                "Authentication failed",
+                "OAuth2 token request was rejected — aborting (scanning "
+                "unauthenticated would be misleading)",
+            )
+            requester.close()
+            return 1
+        ui.status(
+            console, theme, "ok", "Authenticated",
+            f"bearer token acquired via {args.oauth2_token_url} ({args.oauth2_grant_type})",
+        )
+        requester.set_session_recovery(
+            oauth2_authenticator.is_session_valid,
+            lambda: oauth2_authenticator.reauthenticate(requester),
+        )
     if getattr(args, "login_url", None):
         if not getattr(args, "login_data", None):
             print("[ERROR] --login-url requires --login-data.", file=sys.stderr)

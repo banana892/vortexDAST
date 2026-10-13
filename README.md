@@ -91,6 +91,30 @@ vortex -u https://app.local/ \
   --logged-out-text "Please log in"
 ```
 
+OAuth2/OIDC-protected target (exchanges credentials for a bearer access
+token at the authorization server's token endpoint and attaches it to every
+request; mutually exclusive with `--login-url`). `client_credentials` is a
+service-level client id/secret, no end-user account:
+
+```bash
+vortex -u https://api.app.local/ \
+  --oauth2-token-url https://idp.local/oauth/token \
+  --oauth2-client-id my-client \
+  --oauth2-client-secret s3cret
+```
+
+`password` (Resource Owner Password Credentials) exchanges a test account's
+own username/password instead — and either grant transparently refreshes the
+token mid-scan once it expires or the resource server rejects it:
+
+```bash
+vortex -u https://api.app.local/ \
+  --oauth2-token-url https://idp.local/oauth/token \
+  --oauth2-grant-type password \
+  --oauth2-client-id my-client \
+  --oauth2-username bob --oauth2-password s3cret
+```
+
 Role matrix (opt-in; logs in a *second* identity with the same login
 mechanism and diffs what each can reach — surfaces vertical privilege
 escalation on sensitive paths and, for any object-reference parameter,
@@ -229,7 +253,11 @@ Key flag groups (run `vortex -h` for the full list):
   recovery), `--no-csrf-harvest` (disable hidden-field harvesting), `--mfa-url`
   + `--mfa-data` + `--mfa-method` + `--mfa-success-text` + `--mfa-failure-text`
   (multi-step/MFA, with `{totp:SECRET}` for a live code), `--role2-login-data`
-  (role-matrix: a second identity via the same login mechanism)
+  (role-matrix: a second identity via the same login mechanism),
+  `--oauth2-token-url` + `--oauth2-grant-type` + `--oauth2-client-id` +
+  `--oauth2-client-secret` + `--oauth2-username` + `--oauth2-password` +
+  `--oauth2-scope` (OAuth2/OIDC bearer-token auth, mutually exclusive with
+  `--login-url`)
 - **Network recon (opt-in):** `--port-scan`, `--ports`, `--subnet`,
   `--max-subnet-hosts`, `--subnet-workers`
 - **External tools (opt-in):** `--tools` (`all` or a comma list, e.g.
