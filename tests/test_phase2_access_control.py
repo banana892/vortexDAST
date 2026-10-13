@@ -10,6 +10,9 @@ Covers:
   • Non-sensitive path and no-auth scan → Part 1 skipped
   • IDOR object-reference swap → MEDIUM / TENTATIVE
   • IDOR suppressed when swap yields identical / error / oversized response
+  • Role matrix: second identity reaching a sensitive path → HIGH / FIRM
+  • Role matrix: second identity fetching the same object reference → HIGH / FIRM
+  • Role matrix checks are no-ops when no second identity is configured
   • Payload loading, graceful degradation, registry discovery
 """
 
@@ -286,3 +289,75 @@ class TestIDOR:
         mod = AccessControlCheckModule(shared)
         findings = mod.run(_endpoint("https://t.com/blog", {"page": ["1"]}))
         assert [f for f in findings if f.confidence == Confidence.TENTATIVE] == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Part 3 — role matrix (second identity)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRoleMatrix:
+    def test_second_identity_reaches_sensitive_path_reported(self) -> None:
+        body = "<h1>Admin Dashboard</h1>" + "x" * 500
+        shared = _requester(cookies={"sid": "primary"})
+        shared.get.return_value = (_resp(body, 200), None)
+        role = MagicMock()
+        role.get.return_value = (_resp(body, 200), None)
+
+        mod = AccessControlCheckModule(shared)
+        mod.set_role_requester(role)
+        findings = mod.run(_endpoint("https://t.com/admin/users"))
+
+        hits = [f for f in findings if "Second Identity Reaches" in f.title]
+        assert len(hits) == 1
+        assert hits[0].severity == Severity.HIGH
+        assert hits[0].confidence == Confidence.FIRM
+
+    def test_second_identity_denied_not_reported(self) -> None:
+        shared = _requester(cookies={"sid": "primary"})
+        shared.get.return_value = (_resp("admin page", 200), None)
+        role = MagicMock()
+        role.get.return_value = (_resp("Forbidden", 403), None)
+
+        mod = AccessControlCheckModule(shared)
+        mod.set_role_requester(role)
+        findings = mod.run(_endpoint("https://t.com/admin"))
+        assert [f for f in findings if "Second Identity Reaches" in f.title] == []
+
+    def test_role_idor_same_object_reported(self) -> None:
+        shared = _requester(cookies={"sid": "primary"})
+        body = "Invoice #5 total $100 " + "a" * 100
+        shared.get.return_value = (_resp(body, 200), None)
+        role = MagicMock()
+        role.get.return_value = (_resp(body, 200), None)
+
+        mod = AccessControlCheckModule(shared)
+        mod.set_role_requester(role)
+        findings = mod.run(_endpoint("https://t.com/view", {"id": ["5"]}))
+
+        hits = [f for f in findings if "Second Identity Accessed Same Object" in f.title]
+        assert len(hits) == 1
+        assert hits[0].severity == Severity.HIGH
+        assert hits[0].confidence == Confidence.FIRM
+        assert hits[0].parameter == "id"
+
+    def test_role_idor_denied_not_reported(self) -> None:
+        shared = _requester(cookies={"sid": "primary"})
+        shared.get.return_value = (_resp("Invoice #5 total $100 " + "a" * 100, 200), None)
+        role = MagicMock()
+        role.get.return_value = (_resp("Please sign in", 403), None)
+
+        mod = AccessControlCheckModule(shared)
+        mod.set_role_requester(role)
+        findings = mod.run(_endpoint("https://t.com/view", {"id": ["5"]}))
+        assert [f for f in findings if "Second Identity Accessed Same Object" in f.title] == []
+
+    def test_no_role_requester_configured_is_noop(self) -> None:
+        shared = _requester(cookies={"sid": "primary"})
+        shared.get.return_value = (_resp("<h1>Admin Dashboard</h1>" + "x" * 500, 200), None)
+        mod = AccessControlCheckModule(shared)
+        # No set_role_requester() call — Part 3 must not run at all.
+        findings = mod.run(_endpoint("https://t.com/admin", {"id": ["5"]}))
+        assert all(
+            "Second Identity" not in f.title for f in findings
+        )

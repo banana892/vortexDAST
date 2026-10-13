@@ -952,6 +952,20 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="TEXT",
         help="Substring that marks a failed/rejected MFA code.",
     )
+    parser.add_argument(
+        "--role2-login-data",
+        default=None,
+        metavar="FIELDS",
+        help=(
+            "Role-matrix testing: log in a *second*, independently "
+            "authenticated session with these credentials (same "
+            "'name=value&...' syntax as --login-data), reusing --login-url/"
+            "--login-method/--login-success-text/--login-failure-text. "
+            "access_control_check then diffs what each identity can reach to "
+            "surface vertical/horizontal broken access control. Requires "
+            "--login-url."
+        ),
+    )
 
     # ── Finding filters ─────────────────────────────────────────────────────────
     parser.add_argument(
@@ -1529,6 +1543,10 @@ def run_scan(args: argparse.Namespace) -> int:
     # Authenticate before crawling so every request carries the session, and
     # wire session-loss recovery so a dropped session is re-established mid-scan
     # rather than silently voiding every subsequent finding.
+    role_requester: Optional[Requester] = None
+    if getattr(args, "role2_login_data", None) and not getattr(args, "login_url", None):
+        print("[ERROR] --role2-login-data requires --login-url.", file=sys.stderr)
+        return 2
     if getattr(args, "login_url", None):
         if not getattr(args, "login_data", None):
             print("[ERROR] --login-url requires --login-data.", file=sys.stderr)
@@ -1580,6 +1598,46 @@ def run_scan(args: argparse.Namespace) -> int:
                 authenticator.is_session_valid,
                 lambda: authenticator.reauthenticate(requester),
             )
+
+        # ── Role-matrix second identity (optional) ──────────────────────────
+        # Same login mechanism, different credentials, its own session — lets
+        # access_control_check diff what each identity can reach.
+        if getattr(args, "role2_login_data", None):
+            try:
+                role_credentials = parse_login_data(args.role2_login_data)
+            except ValueError as exc:
+                print(f"[ERROR] invalid --role2-login-data: {exc}", file=sys.stderr)
+                requester.close()
+                return 2
+            role_requester = Requester(
+                timeout=timeout,
+                user_agent=str(req_cfg.get("user_agent", "VortexDAST/1.0")),
+                rate_limit_rps=rate_limit_rps,
+                verify_ssl=verify_ssl,
+                proxy=proxy,
+                max_retries=int(req_cfg.get("max_retries", 3)),
+                max_workers=threads,
+            )
+            role_authenticator = FormLoginAuthenticator(
+                login_url=args.login_url,
+                credentials=role_credentials,
+                method=args.login_method,
+                success_text=args.login_success_text,
+                failure_text=args.login_failure_text,
+                harvest_hidden_fields=not args.no_csrf_harvest,
+            )
+            if role_authenticator.login(role_requester):
+                ui.status(
+                    console, theme, "ok", "Role-matrix identity authenticated",
+                    f"second session established via {args.login_url}",
+                )
+            else:
+                ui.status(
+                    console, theme, "error", "Role-matrix login failed",
+                    "--role2-login-data was rejected — continuing without role-matrix checks",
+                )
+                role_requester.close()
+                role_requester = None
 
     scan_start = time.monotonic()
 
@@ -1794,6 +1852,10 @@ def run_scan(args: argparse.Namespace) -> int:
                         int(getattr(args, "subnet_workers", 100))
                     )
                 return inst
+            if name == "access_control_check" and role_requester is not None:
+                inst = cls(requester)
+                inst.set_role_requester(role_requester)  # type: ignore[attr-defined]
+                return inst
             return cls(requester)
 
         module_instances: List[BaseScannerModule] = [
@@ -2001,6 +2063,8 @@ def run_scan(args: argparse.Namespace) -> int:
         logger.warning("Scan interrupted by user.")
     finally:
         requester.close()
+        if role_requester is not None:
+            role_requester.close()
 
     scan_duration = time.monotonic() - scan_start
 

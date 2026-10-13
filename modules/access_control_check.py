@@ -25,6 +25,17 @@ testing *without* a full dual-mode crawler refactor:
     session is configured** — without an authorization boundary to cross, a
     differing public record is expected content, not IDOR.
 
+3.  **Role matrix** (``firm``, only when a second identity is configured via
+    ``--role2-login-data``): the same sensitive-path check as Part 1, run
+    against a second, independently authenticated session instead of an
+    anonymous one — surfaces vertical privilege escalation (a lower-privilege
+    second account reaching an admin-shaped page). Additionally, every
+    object-reference parameter the primary session observed is re-requested
+    *unmodified* through the second session — if a genuinely distinct account
+    gets the exact same object back, that's direct (not guessed) evidence of
+    horizontal access control failure, so it is reported at ``firm``
+    confidence rather than Part 2's ``tentative`` ID-swap guess.
+
 False-Positive Reduction
 ------------------------
 *   Part 1 runs only when auth is configured and only on sensitive paths, so
@@ -90,6 +101,15 @@ _CVSS_VECTOR_IDOR = build_vector(
 )
 _CVSS_SCORE_IDOR: float = cvss_calc(_CVSS_VECTOR_IDOR)
 
+# Role-matrix cross-identity object access: no guessing involved (a second,
+# genuinely distinct account retrieved the exact reference), only needs an
+# account of its own to exploit.
+# AV:N / AC:L / PR:L / UI:N / S:U / C:H / I:N / A:N
+_CVSS_VECTOR_ROLE_IDOR = build_vector(
+    AV="N", AC="L", PR="L", UI="N", S="U", C="H", I="N", A="N"
+)
+_CVSS_SCORE_ROLE_IDOR: float = cvss_calc(_CVSS_VECTOR_ROLE_IDOR)
+
 
 class AccessControlCheckModule(BaseScannerModule):
     """Broken Access Control detection (unauthenticated exposure + IDOR)."""
@@ -112,11 +132,24 @@ class AccessControlCheckModule(BaseScannerModule):
 
         self._auth_configured = _detect_auth(requester)
         self._unauth_requester: Optional[Requester] = None
+        self._role_requester: Optional[Requester] = None
 
         # Thread-safe dedup: assess each origin+path only once.
         self._seen_lock = threading.Lock()
         self._seen_unauth: Set[str] = set()
         self._seen_idor: Set[str] = set()
+        self._seen_role: Set[str] = set()
+        self._seen_role_idor: Set[str] = set()
+
+    def set_role_requester(self, requester: Requester) -> None:
+        """
+        Configure a second, independently authenticated session (role-matrix
+        testing). When set, every endpoint is additionally checked against
+        this identity: sensitive-path reach (vertical escalation) and direct
+        cross-identity object access (horizontal escalation). See class
+        docstring Part 3.
+        """
+        self._role_requester = requester
 
     # ── Public entry point ────────────────────────────────────────────────────
 
@@ -140,85 +173,140 @@ class AccessControlCheckModule(BaseScannerModule):
                 if link_params:
                     findings.extend(self._check_idor(link.url, link_params))
 
+        if self._role_requester is not None:
+            findings.extend(self._check_role_access(endpoint.url))
+            if endpoint.query_params:
+                findings.extend(self._check_role_idor(endpoint.url, endpoint.query_params))
+            for link in endpoint.links:
+                link_params = getattr(link, "query_params", None)
+                if link_params:
+                    findings.extend(self._check_role_idor(link.url, link_params))
+
         return findings
 
     # ── Part 1: unauthenticated access to protected resource ───────────────────
 
     def _check_unauth_access(self, url: str) -> List[Finding]:
+        other = self._get_unauth_requester()
+        if other is None:
+            return []
+        return self._check_cross_identity_access(
+            url,
+            other=other,
+            dedup_set=self._seen_unauth,
+            other_label="Anonymous (no cookies/auth)",
+            title="Broken Access Control — Unauthenticated Access to Protected Resource",
+            description=(
+                "The sensitive endpoint '{url}' returned effectively the same "
+                "content when requested without any session cookies or "
+                "authentication headers as it did when authenticated. The "
+                "resource is therefore accessible to anonymous users, which "
+                "indicates missing or broken server-side authorization checks."
+            ),
+            log_label="unauthenticated access to sensitive resource",
+        )
+
+    def _check_role_access(self, url: str) -> List[Finding]:
+        """Part 3 (vertical): can the second role-matrix identity reach this too?"""
+        assert self._role_requester is not None
+        return self._check_cross_identity_access(
+            url,
+            other=self._role_requester,
+            dedup_set=self._seen_role,
+            other_label="Second role-matrix identity",
+            title="Broken Access Control — Second Identity Reaches Sensitive Resource",
+            description=(
+                "The sensitive endpoint '{url}' returned effectively the same "
+                "content for the second, independently authenticated identity "
+                "(--role2-login-data) as it did for the primary scan session. "
+                "If that second identity is meant to hold lower privileges, this "
+                "is vertical privilege escalation — missing or broken "
+                "role-based authorization."
+            ),
+            log_label="role-matrix: second identity reaches sensitive resource",
+        )
+
+    def _check_cross_identity_access(
+        self,
+        url: str,
+        *,
+        other: Requester,
+        dedup_set: Set[str],
+        other_label: str,
+        title: str,
+        description: str,
+        log_label: str,
+    ) -> List[Finding]:
+        """
+        Shared logic behind Part 1 (anonymous) and Part 3 (role matrix):
+        fetch ``url`` with the primary session and with ``other``; flag it
+        when both return essentially the same HTTP 200 content and ``other``'s
+        response isn't itself a login/access-denied page.
+        """
         if not self._is_sensitive_path(url):
             return []
 
         key = _origin_path_key(url)
         with self._seen_lock:
-            if key in self._seen_unauth:
+            if key in dedup_set:
                 return []
-            self._seen_unauth.add(key)
+            dedup_set.add(key)
 
-        # Authenticated fetch (shared, credentialed requester).
-        auth_resp, auth_err = self.requester.get(url)
-        if auth_err or auth_resp is None or auth_resp.status_code != 200:
+        primary_resp, primary_err = self.requester.get(url)
+        if primary_err or primary_resp is None or primary_resp.status_code != 200:
             return []
 
-        # Anonymous fetch (credential-stripped clone).
-        unauth = self._get_unauth_requester()
-        if unauth is None:
-            return []
-        noauth_resp, noauth_err = unauth.get(url)
-        if noauth_err or noauth_resp is None:
+        other_resp, other_err = other.get(url)
+        if other_err or other_resp is None:
             return []
 
         # Correctly protected: explicit deny / auth-required status.
-        if noauth_resp.status_code in (401, 403):
+        if other_resp.status_code in (401, 403):
             return []
-        if noauth_resp.status_code != 200:
+        if other_resp.status_code != 200:
             return []
         # Redirected somewhere else (e.g. a login page) → treated as protected.
-        if noauth_resp.history and _path_of(noauth_resp.url) != _path_of(url):
+        if other_resp.history and _path_of(other_resp.url) != _path_of(url):
             return []
         # Body looks like a login / access-denied page → protected.
-        if self._looks_like_login(noauth_resp.text):
+        if self._looks_like_login(other_resp.text):
             return []
 
-        # Both 200 and bodies essentially identical → served to anyone.
-        if not _bodies_similar(auth_resp.text, noauth_resp.text):
+        # Both 200 and bodies essentially identical → served to this identity too.
+        if not _bodies_similar(primary_resp.text, other_resp.text):
             return []
 
-        logger.info("⚡ BAC: unauthenticated access to sensitive resource %s", url)
+        logger.info("⚡ BAC: %s — %s", log_label, url)
         return [
             Finding(
-                title="Broken Access Control — Unauthenticated Access to Protected Resource",
+                title=title,
                 severity=Severity.HIGH,
                 confidence=Confidence.FIRM,
                 url=url,
                 parameter=None,
                 payload=None,
                 evidence=(
-                    f"Authenticated response: HTTP {auth_resp.status_code}, "
-                    f"{len(auth_resp.text)} bytes. Anonymous response (no cookies/"
-                    f"auth): HTTP {noauth_resp.status_code}, {len(noauth_resp.text)} "
-                    "bytes — essentially identical content."
+                    f"Primary-session response: HTTP {primary_resp.status_code}, "
+                    f"{len(primary_resp.text)} bytes. {other_label} response: HTTP "
+                    f"{other_resp.status_code}, {len(other_resp.text)} bytes — "
+                    "essentially identical content."
                 ),
-                description=(
-                    f"The sensitive endpoint '{url}' returned effectively the same "
-                    "content when requested without any session cookies or "
-                    "authentication headers as it did when authenticated. The "
-                    "resource is therefore accessible to anonymous users, which "
-                    "indicates missing or broken server-side authorization checks."
-                ),
+                description=description.format(url=url),
                 remediation=(
                     "Enforce authorization on the server for every sensitive route — "
                     "never rely on the UI hiding links. Verify the session/identity "
                     "and the user's permission to the specific resource before "
                     "returning it, and return 401/403 (or redirect to login) for "
-                    "anonymous requests."
+                    "requests that should not see it."
                 ),
                 cvss_vector=_CVSS_VECTOR_UNAUTH,
                 cvss_score=_CVSS_SCORE_UNAUTH,
                 extra={
-                    "auth_status": auth_resp.status_code,
-                    "noauth_status": noauth_resp.status_code,
-                    "auth_len": len(auth_resp.text),
-                    "noauth_len": len(noauth_resp.text),
+                    "primary_status": primary_resp.status_code,
+                    "other_status": other_resp.status_code,
+                    "primary_len": len(primary_resp.text),
+                    "other_len": len(other_resp.text),
+                    "other_identity": other_label,
                     "module": self.name,
                 },
             )
@@ -330,12 +418,94 @@ class AccessControlCheckModule(BaseScannerModule):
             },
         )
 
+    # ── Part 3b: role matrix — direct cross-identity object access ─────────────
+
+    def _check_role_idor(
+        self, url: str, params: Dict[str, List[str]]
+    ) -> List[Finding]:
+        """
+        Re-request every object-reference parameter's *unmodified* value
+        through the second role-matrix identity. Unlike Part 2, there is no
+        guessing: a genuinely distinct, independently authenticated account
+        either gets the same record back or it doesn't, so a hit is reported
+        at ``firm`` confidence.
+        """
+        assert self._role_requester is not None
+        findings: List[Finding] = []
+        base_params = {k: v[0] for k, v in params.items() if v}
+
+        for param, value in base_params.items():
+            if not self._is_object_ref(param, value):
+                continue
+
+            key = f"{_origin_path_key(url)}::{param}"
+            with self._seen_lock:
+                if key in self._seen_role_idor:
+                    continue
+                self._seen_role_idor.add(key)
+
+            baseline = self._get_body_if_200(url, base_params)
+            if baseline is None:
+                continue
+            candidate = self._get_body_if_200(url, base_params, requester=self._role_requester)
+            if candidate is None or not candidate or self._looks_like_login(candidate):
+                continue
+
+            findings.append(self._role_idor_finding(url, param, value, baseline, candidate))
+
+        return findings
+
+    def _role_idor_finding(
+        self, url: str, param: str, value: str, baseline: str, candidate: str
+    ) -> Finding:
+        logger.info(
+            "⚡ BAC/role-matrix: second identity retrieved %s's own object %s=%s",
+            url, param, value,
+        )
+        return Finding(
+            title="Broken Access Control — Second Identity Accessed Same Object Reference",
+            severity=Severity.HIGH,
+            confidence=Confidence.FIRM,
+            url=url,
+            parameter=param,
+            payload=f"{param}={value}",
+            evidence=(
+                f"Primary session ({param}={value}): {len(baseline)} bytes, HTTP 200. "
+                f"Second role-matrix identity requested the identical reference and "
+                f"also got HTTP 200, {len(candidate)} bytes — not a login/denied page."
+            ),
+            description=(
+                f"The object reference '{param}={value}' at '{url}', reachable by the "
+                "primary scan session, was also retrievable by a second, "
+                "independently authenticated identity (--role2-login-data) without "
+                "modification. If that object belongs to the primary identity only, "
+                "this is a confirmed horizontal access-control failure — no guessing "
+                "was needed, a genuinely distinct account retrieved it directly."
+            ),
+            remediation=(
+                "Enforce object-level authorization: verify the authenticated user "
+                "owns or may access the requested object before returning it. Prefer "
+                "unguessable identifiers (UUIDs) and scope queries to the current "
+                "user/tenant."
+            ),
+            cvss_vector=_CVSS_VECTOR_ROLE_IDOR,
+            cvss_score=_CVSS_SCORE_ROLE_IDOR,
+            extra={
+                "object_value": value,
+                "baseline_len": len(baseline),
+                "candidate_len": len(candidate),
+                "module": self.name,
+            },
+        )
+
     # ── Helpers ────────────────────────────────────────────────────────────────
 
-    def _get_body_if_200(self, url: str, params: Dict[str, str]) -> Optional[str]:
+    def _get_body_if_200(
+        self, url: str, params: Dict[str, str], *, requester: Optional[Requester] = None
+    ) -> Optional[str]:
         parsed = urlparse(url)
         full_url = parsed._replace(query=urlencode(params)).geturl()
-        resp, err = self.requester.get(full_url)
+        resp, err = (requester or self.requester).get(full_url)
         if err or resp is None or resp.status_code != 200:
             return None
         return resp.text

@@ -323,10 +323,27 @@ own quality:
     verified against the RFC's published SHA-1 test vectors — so a real
     authenticator-app MFA flow can be scanned unattended; a fixed backup
     code works too.
-  - 🚧 *not done:* **OAuth2/OIDC** token flows, and a multi-identity
-    **role matrix** (scan as two credentials, diff what each can reach to
-    surface broken access control) — both are a different shape of work
-    from the form-login scaffold above and still need their own design.
+  - ✅ *shipped:* **role matrix** — `--role2-login-data` logs in a second,
+    independently authenticated session through the *same* login mechanism
+    (`--login-url`/`--login-method`/`--login-success-text`/
+    `--login-failure-text`), and `AccessControlCheckModule.set_role_requester()`
+    wires it into `access_control_check.py`'s existing sensitive-path and
+    object-reference machinery: Part 1's unauthenticated-access check and
+    Part 3's new cross-identity check now share one helper
+    (`_check_cross_identity_access`), so a second identity reaching a
+    sensitive path is reported the same way anonymous access is (`HIGH`/
+    `FIRM`) — surfacing vertical privilege escalation. Every object-reference
+    parameter the primary session observed is also re-requested *unmodified*
+    through the second identity (`_check_role_idor`); unlike Part 2's ±1
+    ID-swap guess, a hit here is a genuinely distinct authenticated account
+    retrieving the exact same object, so it's reported at `FIRM` rather than
+    `TENTATIVE`. **Known limit:** reuses the primary login URL/method/
+    success-failure signals rather than taking a fully independent second
+    login config — covers the common case (one login form, two accounts);
+    an app whose roles log in through genuinely different endpoints needs a
+    follow-up.
+  - 🚧 *not done:* **OAuth2/OIDC** token flows — a different shape of work
+    from the form-login scaffold above and still needs its own design.
 
 ### Phase E — Tier-3 adapters + chaining polish
 - ~~ffuf~~ ✅ shipped early (curated-catalogue default wordlist, `-ac`
@@ -402,7 +419,8 @@ Ordered by impact; several are now *resolved by the plan above*.
    `core/auth.py` (`FormLoginAuthenticator`) + `Requester.set_session_recovery`
    give form login, CSRF-token harvesting, multi-step/MFA (incl. live TOTP),
    and transparent mid-scan re-auth (replaying every configured step with a
-   fresh code). OAuth2/OIDC and a role-matrix comparison remain — see Phase D.
+   fresh code). `--role2-login-data` adds a role-matrix second identity (see
+   Phase D). OAuth2/OIDC remains open.
 2. **No JS/SPA rendering** — ✅ *resolved by Phase D* (`DomWatcher`,
    `--dynamic`). A thin static-only result is still possible if `--dynamic`
    is left off, but it's no longer the only option.
@@ -475,7 +493,9 @@ Ordered by impact; several are now *resolved by the plan above*.
 - Host-scoped TCP port scan + explicit CIDR subnet sweep (opt-in, capped,
   parallelised).
 - Form-login authentication: CSRF-token harvesting, multi-step/MFA (incl.
-  live RFC 6238 TOTP), + mid-scan session recovery that replays every step.
+  live RFC 6238 TOTP), + mid-scan session recovery that replays every step,
+  + a role-matrix second identity (`--role2-login-data`) that
+  `access_control_check` diffs against the primary session.
 - Tool orchestration (Phases A + B + C + E, complete): `ToolAdapter`
   framework, `--tools` / `--no-tools` / `--tool-timeout` / `--list-tools`, 9
   adapters (nuclei, nmap, httpx, ffuf, sqlmap, interactsh, nikto,
@@ -600,6 +620,14 @@ Ordered by impact; several are now *resolved by the plan above*.
   input only — no URL fetch, no well-known-path auto-discovery. All three
   "API testing" sub-items (discovery, fuzzing, spec import) are now
   shipped.
+- 2026-10-14 — Role-matrix second identity shipped: `--role2-login-data`
+  authenticates a second session through the same login mechanism, and
+  `AccessControlCheckModule.set_role_requester()` wires it into Part 1's
+  sensitive-path check (generalized into a shared helper,
+  `_check_cross_identity_access`) and a new direct cross-identity
+  object-reference check (`_check_role_idor`) — FIRM confidence since it's a
+  real second account, not an ID-swap guess. OAuth2/OIDC remains the one
+  open item under "Authenticated scanning — follow-ups."
 - 2026-10-13 — Blind XXE shipped, closing §5 item 4's OAST gap
   completely: `interactsh_adapter.py` gained a dedicated,
   parameter-independent probe (`_send_xxe_probe`/`_render_xxe_payload`)

@@ -91,6 +91,18 @@ vortex -u https://app.local/ \
   --logged-out-text "Please log in"
 ```
 
+Role matrix (opt-in; logs in a *second* identity with the same login
+mechanism and diffs what each can reach — surfaces vertical privilege
+escalation on sensitive paths and, for any object-reference parameter,
+direct horizontal access to the primary identity's own object):
+
+```bash
+vortex -u https://app.local/ \
+  --login-url https://app.local/login \
+  --login-data "username=admin&password=s3cret" \
+  --role2-login-data "username=lowpriv&password=s3cret"
+```
+
 JS-rendered SPA (opt-in; headless Chromium renders each page before the
 crawler extracts links/forms — closes modern SPAs that show nothing to a
 plain HTTP GET):
@@ -216,7 +228,8 @@ Key flag groups (run `vortex -h` for the full list):
   `--login-url` + `--login-data` (form login), `--logged-out-text` (session
   recovery), `--no-csrf-harvest` (disable hidden-field harvesting), `--mfa-url`
   + `--mfa-data` + `--mfa-method` + `--mfa-success-text` + `--mfa-failure-text`
-  (multi-step/MFA, with `{totp:SECRET}` for a live code)
+  (multi-step/MFA, with `{totp:SECRET}` for a live code), `--role2-login-data`
+  (role-matrix: a second identity via the same login mechanism)
 - **Network recon (opt-in):** `--port-scan`, `--ports`, `--subnet`,
   `--max-subnet-hosts`, `--subnet-workers`
 - **External tools (opt-in):** `--tools` (`all` or a comma list, e.g.
