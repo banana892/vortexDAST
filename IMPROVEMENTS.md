@@ -1,6 +1,6 @@
 # VortexDAST — Implementation Roadmap
 
-**Last updated:** 2026-10-09
+**Last updated:** 2026-10-13
 
 This is the plan of record for VortexDAST. It supersedes the earlier
 phase-based improvement roadmap and the old `docs/REMAINING_WORK.md` digest.
@@ -163,18 +163,24 @@ the seed URL — see Phase E's "full data-chaining," now shipped.
    reaches sqlmap only as an HTTP JSON value, never argv/shell, so there's no
    command-injection surface at all here. Requires `sqlmapapi` on `PATH`
    (bundled with sqlmap; a wrapper script is enough — see Contributing).
-5. **interactsh** — ✅ *shipped.* `adapters/interactsh_adapter.py` drives
-   `interactsh-client`, asking it to generate one unique correlation domain
-   **per query parameter** on the target (`-n`), substitutes each into that
-   one parameter (others untouched), waits out a short grace period, then
+5. **interactsh** — ✅ *shipped, now covering SSRF + RCE + SQLi.*
+   `adapters/interactsh_adapter.py` drives `interactsh-client`, asking it to
+   generate one unique correlation domain **per (query parameter, payload)
+   combination** on the target (`-n`), substitutes each rendered payload into
+   its one parameter (others untouched), waits out a short grace period, then
    reads back any DNS/HTTP callback (`-json -o`) and attributes it to the
-   exact parameter that caused it. Confirms genuinely *blind* SSRF — a server
-   that fetches the attacker's URL but reflects nothing back, which
-   `ssrf_check`'s reflection-based heuristic cannot see — closing the §5 item
-   4 OAST gap for the one seed URL each adapter currently gets. A target with
-   no query parameters is skipped without starting the client (nothing to
-   probe). Not yet wired into sqli/xxe/command-injection OOB confirmation —
-   SSRF-only for v1.
+   exact parameter *and* vulnerability class that caused it. Five payload
+   specs run per parameter: a plain callback URL (blind SSRF), two OS
+   command-injection shapes (`; nslookup <domain> #` and `` `nslookup
+   <domain>` ``, confirming blind RCE), and two DBMS-specific blind-SQLi OOB
+   payloads (MSSQL `xp_dirtree`, Oracle `UTL_INADDR.get_host_address`) —
+   closing most of the §5 item 4 OAST gap for the one seed URL each adapter
+   currently gets. Total probes are capped (`_MAX_PROBES`) alongside the
+   existing per-parameter cap, since 5 payloads/param multiplies request
+   volume. A target with no query parameters is skipped without starting the
+   client (nothing to probe). **Still open:** blind XXE needs an XML request
+   body, not a query-param substitution — a different delivery mechanism
+   from everything else this adapter does, left for a follow-up.
 
 ### Phase D — Our own web-app depth (unique value, not outsourced)
 These are the things no external tool gives us and that define VortexDAST's
@@ -296,15 +302,25 @@ Ordered by impact; several are now *resolved by the plan above*.
    is left off, but it's no longer the only option.
 3. **No API / JSON-body testing** — most modules fuzz only query params and
    HTML form fields. **Phase D.**
-4. **No OAST** — blind SSRF/SQLi/RCE/XXE undetectable. **✅ Blind SSRF
-   resolved by Phase C** (`interactsh` adapter, GET query parameters). Blind
-   SQLi/RCE/XXE still have no OOB confirmation path — same adapter's
-   machinery, different payload shapes, left for a follow-up.
+4. **No OAST** — blind SSRF/SQLi/RCE/XXE undetectable. **✅ Blind SSRF, SQLi
+   (MSSQL/Oracle) and RCE resolved by Phase C** (`interactsh` adapter, GET
+   query parameters). Blind XXE still has no OOB confirmation path — it
+   needs an XML request body rather than a query-param substitution, a
+   different delivery mechanism from this adapter's other four payloads.
 5. **Missing vuln classes** — command injection, open redirect, XXE, CORS,
    file-upload. Largely **covered by Phase B** (nuclei templates); native
    modules optional afterwards.
-6. **Shallow detectors** — `sqli_check` has no time-based blind (→ Phase C
-   sqlmap); `traversal_check` is GET-only; `ssrf_check` is keyword-gated.
+6. **Shallow detectors** — ✅ *time-based blind SQLi resolved.* `sqli_check`
+   now runs a dedicated time-based heuristic (GET params and POST/form
+   fields) alongside its existing error-based and boolean-blind checks:
+   four DBMS-specific delay payloads (MySQL `SLEEP()`, PostgreSQL
+   `pg_sleep()`, MSSQL `WAITFOR DELAY`, Oracle's privilege-free
+   cartesian-product stall) in `payloads/sqli_probes.json`, flagged only
+   when the measured delay clears both a relative (60% of the payload's own
+   injected delay) and an absolute (2s) threshold *and* reproduces on a
+   second confirmation request — so ordinary network/CDN jitter on a slow
+   target can't masquerade as an injected delay. `traversal_check` is still
+   GET-only; `ssrf_check` is still keyword-gated.
 
 ### Operational / safety (independent of the toolset)
 
@@ -421,3 +437,15 @@ Ordered by impact; several are now *resolved by the plan above*.
   `HttpxAdapter` probes those hosts alongside nmap's ports, and
   `_TOOL_EXECUTION_PRIORITY` runs nmap/subfinder before httpx. 9/9 adapters
   now installed and registered.
+- 2026-10-12 — `interactsh` adapter extended from SSRF-only to also confirm
+  blind OS command injection and blind SQL injection (MSSQL `xp_dirtree`,
+  Oracle `UTL_INADDR`) via the same per-parameter OOB-callback mechanism —
+  closing most of §5 item 4's OAST gap. Blind XXE remains open (needs an XML
+  body, not a query-param substitution).
+- 2026-10-13 — `sqli_check` time-based blind SQLi shipped, closing §5 item 6's
+  first gap: four DBMS-specific delay probes (MySQL, PostgreSQL, MSSQL,
+  Oracle) run after the existing error/boolean-blind checks on both GET
+  params and POST/form fields, gated by a relative+absolute delay threshold
+  and a reproducing confirmation request to rule out network jitter.
+  `nosql_check` also gained a `$regex` operator-differential probe pair
+  alongside the existing `$ne`/`$eq` pair.

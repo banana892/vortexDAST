@@ -70,6 +70,7 @@ class TestLoading:
         mod = NoSQLCheckModule(_mock_requester(), payloads_path=_NOSQL_PROBES_PATH)
         assert len(mod._boundary_probes) >= 1
         assert len(mod._operator_probes) >= 2
+        assert len(mod._regex_operator_probes) >= 2
         assert len(mod._compiled_patterns) >= 5
 
     def test_missing_payload_handled(self) -> None:
@@ -154,6 +155,37 @@ class TestOperatorDifferential:
         mod = NoSQLCheckModule(req)
         findings = mod.run(_endpoint(query_params={"user": ["bob"]}))
         assert [f for f in findings if f.confidence == Confidence.TENTATIVE] == []
+
+    def test_regex_true_false_length_delta_reported(self) -> None:
+        req = _mock_requester()
+
+        def fake_get(url: str, *a, **k):
+            if "%24regex" in url and "vtxNoSQLvalueThatDoesNotExist" not in url:
+                # ^.*$ → always true → full dataset
+                return (_mock_response("<p>" + "RECORD " * 200 + "</p>"), None)
+            if "%24regex" in url:
+                # anchored-literal $regex → always false → empty
+                return (_mock_response("<p>no results</p>"), None)
+            return (_mock_response("<p>baseline single record</p>"), None)
+
+        req.get.side_effect = fake_get
+        mod = NoSQLCheckModule(req)
+        findings = mod.run(_endpoint(query_params={"user": ["bob"]}))
+
+        regex_findings = [
+            f for f in findings
+            if f.confidence == Confidence.TENTATIVE and f.extra.get("true_operator") == "$regex"
+        ]
+        assert len(regex_findings) == 1
+        f = regex_findings[0]
+        assert f.severity == Severity.MEDIUM
+        assert f.parameter == "user"
+        assert "$regex" in f.payload
+
+    def test_regex_pair_missing_handled(self) -> None:
+        mod = NoSQLCheckModule(_mock_requester())
+        mod._regex_operator_probes = []
+        assert mod._regex_operator_pair() == (None, None)
 
 
 class TestPost:

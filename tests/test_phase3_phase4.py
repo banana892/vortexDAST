@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import timedelta
 from typing import Dict, List
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -30,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from core.crawler import CrawledEndpoint
 from core.parser import ParsedForm, FormField, ParsedLink
 from core.requester import Requester
-from modules.base import Finding, Severity
+from modules.base import Confidence, Finding, Severity
 from modules.headers_audit import HeadersAuditModule, _CaseInsensitiveHeaders
 from modules.xss_check import XSSCheckModule, _load_xss_canaries, _extract_evidence
 from modules.sqli_check import SQLiCheckModule, _load_sqli_probes
@@ -69,12 +70,13 @@ def _make_endpoint(
     )
 
 
-def _mock_response(text: str = "", status: int = 200) -> MagicMock:
+def _mock_response(text: str = "", status: int = 200, elapsed: float = 0.05) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status
     resp.text = text
     resp.content = text.encode()
     resp.headers = {"Content-Type": "text/html"}
+    resp.elapsed = timedelta(seconds=elapsed)
     return resp
 
 
@@ -385,26 +387,35 @@ class TestPayloadLoaders:
         assert encoded_forms == {}
 
     def test_sqli_probes_json_is_valid(self) -> None:
-        probes, patterns, indicators = _load_sqli_probes(_SQLI_PROBES_PATH)
+        probes, time_probes, patterns, indicators = _load_sqli_probes(_SQLI_PROBES_PATH)
         assert len(probes) > 0
+        assert len(time_probes) > 0
         assert len(patterns) > 0
         assert len(indicators) > 0
 
     def test_sqli_probes_have_required_fields(self) -> None:
-        probes, _, _ = _load_sqli_probes(_SQLI_PROBES_PATH)
+        probes, _, _, _ = _load_sqli_probes(_SQLI_PROBES_PATH)
         for probe in probes:
             assert "id" in probe
             assert "value" in probe
 
+    def test_sqli_time_based_probes_have_required_fields(self) -> None:
+        _, time_probes, _, _ = _load_sqli_probes(_SQLI_PROBES_PATH)
+        for probe in time_probes:
+            assert "id" in probe
+            assert "value" in probe
+            assert probe.get("delay_seconds", 0) > 0
+
     def test_sqli_patterns_compiled_for_all_dbms(self) -> None:
-        _, patterns, _ = _load_sqli_probes(_SQLI_PROBES_PATH)
+        _, _, patterns, _ = _load_sqli_probes(_SQLI_PROBES_PATH)
         dbms_names = {p.dbms for p in patterns}
         for expected in ["MySQL", "PostgreSQL", "SQLite", "MSSQL", "Oracle"]:
             assert expected in dbms_names, f"Missing DBMS patterns: {expected}"
 
     def test_sqli_probes_missing_file_returns_empty(self) -> None:
-        probes, patterns, indicators = _load_sqli_probes("/nonexistent/path/sqli.json")
+        probes, time_probes, patterns, indicators = _load_sqli_probes("/nonexistent/path/sqli.json")
         assert probes == []
+        assert time_probes == []
         assert patterns == []
         assert indicators == []
 
@@ -745,6 +756,55 @@ class TestSQLiCheckModule:
             if f.severity == Severity.HIGH:
                 assert f.evidence, "HIGH SQLi finding must have evidence"
 
+    # ── Time-based blind SQLi ─────────────────────────────────────────────
+
+    def test_detects_time_based_blind_mysql(self) -> None:
+        module = self._module()
+        baseline_resp = _mock_response("<html>OK</html>", elapsed=0.05)
+        delayed_resp = _mock_response("<html>OK</html>", elapsed=4.5)
+
+        def fake_get(url, **kwargs):
+            if "SLEEP" in url:
+                return delayed_resp, None
+            return baseline_resp, None
+
+        module.requester.get.side_effect = fake_get
+        ep = _make_endpoint(query_params={"id": ["1"]})
+        findings = module.run(ep)
+
+        time_findings = [f for f in findings if "Time-Based" in f.title]
+        assert len(time_findings) == 1
+        f = time_findings[0]
+        assert f.severity == Severity.HIGH
+        assert f.confidence == Confidence.FIRM
+        assert f.extra["dbms"] == "MySQL"
+
+    def test_time_based_blind_not_reported_without_delay(self) -> None:
+        module = self._module()
+        module.requester.get.return_value = (_mock_response("<html>OK</html>", elapsed=0.08), None)
+        ep = _make_endpoint(query_params={"id": ["1"]})
+        findings = module.run(ep)
+        assert [f for f in findings if "Time-Based" in f.title] == []
+
+    def test_time_based_blind_requires_reproducible_confirmation(self) -> None:
+        """A single slow sample that doesn't reproduce (network jitter) must not be reported."""
+        module = self._module()
+        baseline_resp = _mock_response("<html>OK</html>", elapsed=0.05)
+        slow_once = _mock_response("<html>OK</html>", elapsed=4.5)
+        fast_confirm = _mock_response("<html>OK</html>", elapsed=0.06)
+        call_count = {"n": 0}
+
+        def fake_get(url, **kwargs):
+            if "SLEEP" in url:
+                call_count["n"] += 1
+                return (slow_once, None) if call_count["n"] == 1 else (fast_confirm, None)
+            return baseline_resp, None
+
+        module.requester.get.side_effect = fake_get
+        ep = _make_endpoint(query_params={"id": ["1"]})
+        findings = module.run(ep)
+        assert [f for f in findings if "Time-Based" in f.title] == []
+
     def test_baseline_request_failure_is_skipped_gracefully(self) -> None:
         module = self._module()
         module.requester.get.return_value = (None, "Timeout")
@@ -756,7 +816,7 @@ class TestSQLiCheckModule:
 
     def test_all_dbms_patterns_compile(self) -> None:
         """Every pattern in sqli_probes.json must compile to a valid regex."""
-        _, patterns, _ = _load_sqli_probes(_SQLI_PROBES_PATH)
+        _, _, patterns, _ = _load_sqli_probes(_SQLI_PROBES_PATH)
         assert len(patterns) > 0
         for p in patterns:
             # If the pattern compiled, searching an empty string won't raise.

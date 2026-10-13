@@ -107,6 +107,7 @@ class NoSQLCheckModule(BaseScannerModule):
             self._boundary_probes,
             self._operator_probes,
             self._json_operator_probes,
+            self._regex_operator_probes,
             self._compiled_patterns,
             self._baseline_error_indicators,
         ) = _load_nosql_probes(path)
@@ -176,6 +177,14 @@ class NoSQLCheckModule(BaseScannerModule):
             if op_finding:
                 findings.append(op_finding)
 
+            # (3) $regex operator differential (same mechanism, different operator).
+            regex_finding = self._operator_differential_get(
+                url, base_params, target_param, baseline_body,
+                pair=self._regex_operator_pair(),
+            )
+            if regex_finding:
+                findings.append(regex_finding)
+
         return findings
 
     # ── POST fuzzing ──────────────────────────────────────────────────────────
@@ -214,6 +223,13 @@ class NoSQLCheckModule(BaseScannerModule):
             )
             if op_finding:
                 findings.append(op_finding)
+
+            regex_finding = self._operator_differential_post(
+                form.action_url, base_body, target_field.name, baseline_body,
+                pair=self._regex_operator_pair(),
+            )
+            if regex_finding:
+                findings.append(regex_finding)
 
         return findings
 
@@ -254,6 +270,13 @@ class NoSQLCheckModule(BaseScannerModule):
             if op_finding:
                 findings.append(op_finding)
 
+            regex_finding = self._operator_differential_json(
+                form.action_url, base_body, target_field.name, baseline_body,
+                pair=self._regex_operator_pair(),
+            )
+            if regex_finding:
+                findings.append(regex_finding)
+
         return findings
 
     def _operator_differential_json(
@@ -262,8 +285,9 @@ class NoSQLCheckModule(BaseScannerModule):
         base_body: Dict[str, Any],
         target_field: str,
         baseline_body: str,
+        pair: Optional[Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     ) -> Optional[Finding]:
-        true_probe, false_probe = self._json_operator_pair()
+        true_probe, false_probe = pair if pair else self._json_operator_pair()
         if not true_probe or not false_probe:
             return None
 
@@ -278,7 +302,8 @@ class NoSQLCheckModule(BaseScannerModule):
             return None
 
         return self._evaluate_operator_diff(
-            true_body, false_body, baseline_body, url, target_field, "POST (JSON)"
+            true_body, false_body, baseline_body, url, target_field, "POST (JSON)",
+            true_probe["operator"], false_probe["operator"],
         )
 
     # ── Error analysis ────────────────────────────────────────────────────────
@@ -345,8 +370,9 @@ class NoSQLCheckModule(BaseScannerModule):
         base_params: Dict[str, str],
         target_param: str,
         baseline_body: str,
+        pair: Optional[Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     ) -> Optional[Finding]:
-        true_probe, false_probe = self._operator_pair()
+        true_probe, false_probe = pair if pair else self._operator_pair()
         if not true_probe or not false_probe:
             return None
 
@@ -361,7 +387,8 @@ class NoSQLCheckModule(BaseScannerModule):
             return None
 
         return self._evaluate_operator_diff(
-            true_body, false_body, baseline_body, url, target_param, "GET"
+            true_body, false_body, baseline_body, url, target_param, "GET",
+            true_probe["operator"], false_probe["operator"],
         )
 
     def _operator_differential_post(
@@ -370,8 +397,9 @@ class NoSQLCheckModule(BaseScannerModule):
         base_body: Dict[str, str],
         target_field: str,
         baseline_body: str,
+        pair: Optional[Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     ) -> Optional[Finding]:
-        true_probe, false_probe = self._operator_pair()
+        true_probe, false_probe = pair if pair else self._operator_pair()
         if not true_probe or not false_probe:
             return None
 
@@ -386,7 +414,8 @@ class NoSQLCheckModule(BaseScannerModule):
             return None
 
         return self._evaluate_operator_diff(
-            true_body, false_body, baseline_body, url, target_field, "POST"
+            true_body, false_body, baseline_body, url, target_field, "POST",
+            true_probe["operator"], false_probe["operator"],
         )
 
     def _evaluate_operator_diff(
@@ -397,6 +426,8 @@ class NoSQLCheckModule(BaseScannerModule):
         url: str,
         parameter: str,
         method: str,
+        true_op: str = "$ne",
+        false_op: str = "$eq",
     ) -> Optional[Finding]:
         len_true, len_false = len(true_body), len(false_body)
         if len_true == 0 or len_false == 0:
@@ -421,19 +452,19 @@ class NoSQLCheckModule(BaseScannerModule):
             confidence=Confidence.TENTATIVE,
             url=url,
             parameter=parameter,
-            payload=f"{parameter}[$ne] vs {parameter}[$eq]",
+            payload=f"{parameter}[{true_op}] vs {parameter}[{false_op}]",
             evidence=(
-                f"Always-true ($ne) response: {len_true} bytes | "
-                f"always-false ($eq) response: {len_false} bytes | "
+                f"Always-true ({true_op}) response: {len_true} bytes | "
+                f"always-false ({false_op}) response: {len_false} bytes | "
                 f"difference: {diff_ratio * 100:.1f}%"
             ),
             description=(
                 f"Rewriting parameter '{parameter}' into operator form via {method} "
                 f"produced a {diff_ratio * 100:.1f}% response-length difference between "
-                "an always-true ($ne) and always-false ($eq) comparison operator. This "
-                "indicates the operator reached the query engine and changed its result "
-                "set — consistent with NoSQL query-logic bypass (e.g. authentication "
-                "bypass)."
+                f"an always-true ({true_op}) and always-false ({false_op}) comparison "
+                "operator. This indicates the operator reached the query engine and "
+                "changed its result set — consistent with NoSQL query-logic bypass "
+                "(e.g. authentication bypass)."
             ),
             remediation=(
                 "Reject non-string input where strings are expected and strip MongoDB "
@@ -446,6 +477,8 @@ class NoSQLCheckModule(BaseScannerModule):
                 "len_true_probe": len_true,
                 "len_false_probe": len_false,
                 "diff_ratio": round(diff_ratio, 4),
+                "true_operator": true_op,
+                "false_operator": false_op,
                 "method": method,
                 "module": self.name,
             },
@@ -459,6 +492,15 @@ class NoSQLCheckModule(BaseScannerModule):
         )
         false_probe = next(
             (p for p in self._operator_probes if p.get("logic") == "false"), None
+        )
+        return true_probe, false_probe
+
+    def _regex_operator_pair(self) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        true_probe = next(
+            (p for p in self._regex_operator_probes if p.get("logic") == "true"), None
+        )
+        false_probe = next(
+            (p for p in self._regex_operator_probes if p.get("logic") == "false"), None
         )
         return true_probe, false_probe
 
@@ -590,6 +632,7 @@ def _load_nosql_probes(
     List[Dict[str, Any]],
     List[Dict[str, Any]],
     List[Dict[str, Any]],
+    List[Dict[str, Any]],
     List[_CompiledPattern],
     List[str],
 ]:
@@ -598,16 +641,17 @@ def _load_nosql_probes(
             data = json.load(fh)
     except FileNotFoundError:
         logger.error("nosql_probes.json not found at %s", path)
-        return [], [], [], [], []
+        return [], [], [], [], [], []
     except json.JSONDecodeError as exc:
         logger.error("nosql_probes.json parse error: %s", exc)
-        return [], [], [], [], []
+        return [], [], [], [], [], []
 
     boundary_probes: List[Dict[str, Any]] = data.get("boundary_probes", [])
     operator_probes: List[Dict[str, Any]] = data.get("operator_probes", [])
     json_operator_probes: List[Dict[str, Any]] = data.get(
         "json_operator_probes", operator_probes
     )
+    regex_operator_probes: List[Dict[str, Any]] = data.get("regex_operator_probes", [])
 
     compiled_patterns: List[_CompiledPattern] = []
     raw_patterns: Dict[str, List[str]] = (
@@ -631,10 +675,12 @@ def _load_nosql_probes(
     )
 
     logger.debug(
-        "nosql_check: loaded %d boundary, %d operator, %d JSON probes, %d patterns from %s",
+        "nosql_check: loaded %d boundary, %d operator, %d JSON, %d regex probes, "
+        "%d patterns from %s",
         len(boundary_probes),
         len(operator_probes),
         len(json_operator_probes),
+        len(regex_operator_probes),
         len(compiled_patterns),
         path,
     )
@@ -642,6 +688,7 @@ def _load_nosql_probes(
         boundary_probes,
         operator_probes,
         json_operator_probes,
+        regex_operator_probes,
         compiled_patterns,
         baseline_indicators,
     )

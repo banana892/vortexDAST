@@ -46,6 +46,22 @@
       "description": "JSON body nested $eq operator matches no documents (always-false)."
     }
   ],
+  "regex_operator_probes": [
+    {
+      "id": "nosql_regex_true",
+      "operator": "$regex",
+      "value": "^.*$",
+      "logic": "true",
+      "description": "$regex matching everything (always-true) — detects operator injection via a regex-capable field."
+    },
+    {
+      "id": "nosql_regex_false",
+      "operator": "$regex",
+      "value": "^vtxNoSQLvalueThatDoesNotExist$",
+      "logic": "false",
+      "description": "$regex anchored to an unlikely literal (always-false) for the differential pair."
+    }
+  ],
   "nosql_error_patterns": {
     "patterns": {
       "MongoDB": [

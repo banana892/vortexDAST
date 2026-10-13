@@ -61,6 +61,13 @@ _SQLI_PROBES_PATH = os.path.join(_PAYLOADS_DIR, "sqli_probes.json")
 # Boolean-blind SQLi when no explicit error pattern is found.
 _BLIND_LENGTH_THRESHOLD = 0.10  # 10 %
 
+# Time-based blind: the measured delay must reach at least this fraction of
+# the payload's own injected delay (network/app jitter margin)...
+_TIME_BASED_DELAY_FRACTION = 0.6
+# ...and at least this many seconds in absolute terms, so ordinary request
+# jitter on a slow/CDN-fronted target can't masquerade as an injected delay.
+_TIME_BASED_MIN_DELTA_SECONDS = 2.0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CVSS v3.1 vectors for SQLi finding types
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,6 +95,15 @@ _CVSS_VECTOR_SQLI_BLIND = build_vector(
     AV="N", AC="H", PR="N", UI="N", S="U", C="L", I="L", A="N"
 )
 _CVSS_SCORE_SQLI_BLIND: float = cvss_calc(_CVSS_VECTOR_SQLI_BLIND)  # 4.8
+
+# Time-based blind SQLi (confirmed, reproducible timing oracle): a measured
+# and re-confirmed delay is as strong a proof of query execution as an error
+# signature, but the channel only yields a read oracle (no writes).
+# AV:N / AC:L / PR:N / UI:N / S:U / C:H / I:N / A:N
+_CVSS_VECTOR_SQLI_TIME_BLIND = build_vector(
+    AV="N", AC="L", PR="N", UI="N", S="U", C="H", I="N", A="N"
+)
+_CVSS_SCORE_SQLI_TIME_BLIND: float = cvss_calc(_CVSS_VECTOR_SQLI_TIME_BLIND)
 
 
 
@@ -140,6 +156,7 @@ class SQLiCheckModule(BaseScannerModule):
         path = payloads_path or _SQLI_PROBES_PATH
         (
             self._boundary_probes,
+            self._time_based_probes,
             self._compiled_patterns,
             self._baseline_error_indicators,
         ) = _load_sqli_probes(path)
@@ -253,6 +270,17 @@ class SQLiCheckModule(BaseScannerModule):
             if blind_finding:
                 findings.append(blind_finding)
 
+            # ── Time-based blind heuristic (GET) ──────────────────────────
+            time_finding = self._time_based_blind_check(
+                url=url,
+                base_params=base_params,
+                target_param=target_param,
+                original_value=original_value,
+                baseline_elapsed=baseline_response.elapsed.total_seconds(),
+            )
+            if time_finding:
+                findings.append(time_finding)
+
         return findings
 
     # ── POST form fuzzing ─────────────────────────────────────────────────────
@@ -316,6 +344,17 @@ class SQLiCheckModule(BaseScannerModule):
             )
             if blind_finding:
                 findings.append(blind_finding)
+
+            # ── Time-based blind heuristic (POST) ─────────────────────────
+            time_finding = self._time_based_blind_post_check(
+                url=form.action_url,
+                base_body=base_body,
+                target_field=target_field.name,
+                original_value=original_value,
+                baseline_elapsed=baseline_response.elapsed.total_seconds(),
+            )
+            if time_finding:
+                findings.append(time_finding)
 
         return findings
 
@@ -578,6 +617,152 @@ class SQLiCheckModule(BaseScannerModule):
             },
         )
 
+    # ── Time-based blind heuristics ───────────────────────────────────────────
+
+    def _time_based_blind_check(
+        self,
+        url: str,
+        base_params: Dict[str, str],
+        target_param: str,
+        original_value: str,
+        baseline_elapsed: float,
+    ) -> Optional[Finding]:
+        """Try each time-based probe (GET) until one reproduces its delay."""
+        for probe in self._time_based_probes:
+            fuzzed_params = dict(base_params)
+            fuzzed_params[target_param] = original_value + probe["value"]
+            parsed = urlparse(url)
+            fuzzed_url = parsed._replace(query=urlencode(fuzzed_params)).geturl()
+
+            response, error = self.requester.get(fuzzed_url)
+            if error or response is None:
+                continue
+            elapsed = response.elapsed.total_seconds()
+
+            confirm_elapsed: Optional[float] = None
+            if self._exceeds_delay_threshold(elapsed, baseline_elapsed, probe):
+                confirm_response, confirm_error = self.requester.get(fuzzed_url)
+                if confirm_error or confirm_response is None:
+                    continue
+                confirm_elapsed = confirm_response.elapsed.total_seconds()
+
+            finding = self._evaluate_time_delay(
+                elapsed, confirm_elapsed, baseline_elapsed, probe,
+                url, target_param, "GET",
+            )
+            if finding:
+                return finding
+        return None
+
+    def _time_based_blind_post_check(
+        self,
+        url: str,
+        base_body: Dict[str, str],
+        target_field: str,
+        original_value: str,
+        baseline_elapsed: float,
+    ) -> Optional[Finding]:
+        """Try each time-based probe (POST) until one reproduces its delay."""
+        for probe in self._time_based_probes:
+            fuzzed_body = dict(base_body)
+            fuzzed_body[target_field] = original_value + probe["value"]
+
+            response, error = self.requester.post(url, data=fuzzed_body)
+            if error or response is None:
+                continue
+            elapsed = response.elapsed.total_seconds()
+
+            confirm_elapsed: Optional[float] = None
+            if self._exceeds_delay_threshold(elapsed, baseline_elapsed, probe):
+                confirm_response, confirm_error = self.requester.post(url, data=fuzzed_body)
+                if confirm_error or confirm_response is None:
+                    continue
+                confirm_elapsed = confirm_response.elapsed.total_seconds()
+
+            finding = self._evaluate_time_delay(
+                elapsed, confirm_elapsed, baseline_elapsed, probe,
+                url, target_field, "POST",
+            )
+            if finding:
+                return finding
+        return None
+
+    @staticmethod
+    def _exceeds_delay_threshold(
+        elapsed: float, baseline_elapsed: float, probe: Dict[str, Any]
+    ) -> bool:
+        delay = probe.get("delay_seconds", 0)
+        threshold = max(delay * _TIME_BASED_DELAY_FRACTION, _TIME_BASED_MIN_DELTA_SECONDS)
+        return (elapsed - baseline_elapsed) >= threshold
+
+    def _evaluate_time_delay(
+        self,
+        elapsed: float,
+        confirm_elapsed: Optional[float],
+        baseline_elapsed: float,
+        probe: Dict[str, Any],
+        url: str,
+        parameter: str,
+        method: str,
+    ) -> Optional[Finding]:
+        """
+        Emit a HIGH-confidence time-based blind SQLi finding only when the
+        injected delay is reproduced on a confirmation request — a single
+        slow sample is not trusted, since it may just be network jitter
+        (verified in practice against CDN/WAF-fronted targets).
+        """
+        if not self._exceeds_delay_threshold(elapsed, baseline_elapsed, probe):
+            return None
+        if confirm_elapsed is None or not self._exceeds_delay_threshold(
+            confirm_elapsed, baseline_elapsed, probe
+        ):
+            return None
+
+        delay = probe.get("delay_seconds", 0)
+        dbms = probe.get("dbms", "Unknown DBMS")
+        delta = elapsed - baseline_elapsed
+
+        logger.info(
+            "⚡ SQLi TIME-BLIND: %s | param=%s | dbms=%s | delta=%.2fs (expected ~%ss)",
+            url, parameter, dbms, delta, delay,
+        )
+
+        return Finding(
+            title=f"Time-Based Blind SQL Injection — {dbms}",
+            severity=Severity.HIGH,
+            confidence=Confidence.FIRM,
+            url=url,
+            parameter=parameter,
+            payload=probe["value"],
+            evidence=(
+                f"Baseline response: {baseline_elapsed:.2f}s | "
+                f"injected delay probe (expected ~{delay}s): {elapsed:.2f}s | "
+                f"reproduced on confirmation request: {confirm_elapsed:.2f}s"
+            ),
+            description=(
+                f"Injecting a time-delay payload ('{probe['value']}') into parameter "
+                f"'{parameter}' via {method} consistently added ~{delta:.1f}s to the "
+                f"response time relative to baseline, and this delay was reproduced on "
+                f"a confirmation request. This indicates the injected SQL is executed "
+                f"by the database ({dbms}) even though no error or visible output is "
+                "returned to the response body — a classic blind SQL injection oracle."
+            ),
+            remediation=(
+                "Use parameterised queries (prepared statements) for ALL database "
+                "interactions. Never concatenate user input into SQL strings."
+            ),
+            cvss_vector=_CVSS_VECTOR_SQLI_TIME_BLIND,
+            cvss_score=_CVSS_SCORE_SQLI_TIME_BLIND,
+            extra={
+                "dbms": dbms,
+                "probe_id": probe.get("id"),
+                "expected_delay_s": delay,
+                "measured_delta_s": round(delta, 2),
+                "method": method,
+                "module": self.name,
+            },
+        )
+
     # ── Private utilities ─────────────────────────────────────────────────────
 
     def _match_dbms_errors(
@@ -649,7 +834,7 @@ class SQLiCheckModule(BaseScannerModule):
 
 def _load_sqli_probes(
     path: str,
-) -> Tuple[List[Dict[str, Any]], List["_CompiledPattern"], List[str]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List["_CompiledPattern"], List[str]]:
     """
     Load SQLi probe definitions and compile DBMS error regex patterns.
 
@@ -660,19 +845,20 @@ def _load_sqli_probes(
 
     Returns
     -------
-    (boundary_probes, compiled_patterns, baseline_error_indicators)
+    (boundary_probes, time_based_probes, compiled_patterns, baseline_error_indicators)
     """
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
         logger.error("sqli_probes.json not found at %s", path)
-        return [], [], []
+        return [], [], [], []
     except json.JSONDecodeError as exc:
         logger.error("sqli_probes.json parse error: %s", exc)
-        return [], [], []
+        return [], [], [], []
 
     boundary_probes: List[Dict[str, Any]] = data.get("boundary_probes", [])
+    time_based_probes: List[Dict[str, Any]] = data.get("time_based_probes", [])
 
     # Compile all DBMS error regexes.
     compiled_patterns: List[_CompiledPattern] = []
@@ -696,7 +882,7 @@ def _load_sqli_probes(
     )
 
     logger.debug(
-        "sqli_check: loaded %d probes, %d compiled patterns from %s",
-        len(boundary_probes), len(compiled_patterns), path,
+        "sqli_check: loaded %d probes, %d time-based probes, %d compiled patterns from %s",
+        len(boundary_probes), len(time_based_probes), len(compiled_patterns), path,
     )
-    return boundary_probes, compiled_patterns, baseline_indicators
+    return boundary_probes, time_based_probes, compiled_patterns, baseline_indicators

@@ -151,7 +151,7 @@ class TestParse:
     def test_groups_by_domain_and_prefers_http_confidence(self):
         adapter = InteractshAdapter()
         adapter._target = "http://app.local/?callback=x"
-        adapter._domain_to_param = {"fakeid0": "callback"}
+        adapter._domain_to_combo = {"fakeid0": ("callback", "ssrf")}
         raw = (
             '{"protocol":"dns","unique-id":"fakeid0","remote-address":"1.2.3.4"}\n'
             '{"protocol":"http","unique-id":"fakeid0","remote-address":"1.2.3.5"}\n'
@@ -168,14 +168,14 @@ class TestParse:
 
     def test_dns_only_is_firm_not_certain(self):
         adapter = InteractshAdapter()
-        adapter._domain_to_param = {"fakeid0": "q"}
+        adapter._domain_to_combo = {"fakeid0": ("q", "ssrf")}
         findings = adapter.parse('{"protocol":"dns","unique-id":"fakeid0"}\n')
         assert findings[0].confidence == Confidence.FIRM
 
     def test_unmapped_domain_still_produces_a_finding(self):
         """A callback for a domain we lost track of is still real evidence."""
         adapter = InteractshAdapter()
-        adapter._domain_to_param = {}
+        adapter._domain_to_combo = {}
         findings = adapter.parse('{"protocol":"http","unique-id":"unknown"}\n')
         assert len(findings) == 1
         assert findings[0].parameter == "?"
@@ -184,6 +184,23 @@ class TestParse:
         adapter = InteractshAdapter()
         assert adapter.parse("") == []
         assert adapter.parse("not json\n") == []
+
+    @pytest.mark.parametrize(
+        "kind,expected_severity",
+        [
+            ("rce", Severity.CRITICAL),
+            ("sqli_mssql", Severity.CRITICAL),
+            ("sqli_oracle", Severity.CRITICAL),
+        ],
+    )
+    def test_each_vuln_kind_maps_to_a_distinct_finding(self, kind, expected_severity):
+        adapter = InteractshAdapter()
+        adapter._target = "http://app.local/?q=x"
+        adapter._domain_to_combo = {"fakeid0": ("q", kind)}
+        findings = adapter.parse('{"protocol":"dns","unique-id":"fakeid0"}\n')
+        assert len(findings) == 1
+        assert findings[0].severity == expected_severity
+        assert findings[0].extra["vuln_class"] == kind
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,11 +223,14 @@ class TestRun:
         assert len(findings) == 1
         assert findings[0].parameter == "callback"
         assert findings[0].url == target
+        assert findings[0].extra["vuln_class"] == "ssrf"
 
-        # Exactly one probe per parameter (2 params → 2 requests), and the
-        # probe for 'callback' carried an interactsh-looking URL while
-        # 'name' was left at its original request's untouched value.
-        assert len(seen) == 2
+        # One probe per (parameter, payload-spec) combo: 2 params × 5 specs
+        # (ssrf, 2×rce, 2×sqli) = 10 requests. Only the first combo built for
+        # 'callback' uses the plain-URL (ssrf) payload, so exactly one
+        # request carries an interactsh-looking URL in 'callback' while
+        # 'name' stays at its original request's untouched value.
+        assert len(seen) == 10
         callback_probes = [q for q in seen if q.get("callback", [""])[0].startswith("http://fakeid")]
         assert len(callback_probes) == 1
         assert callback_probes[0]["name"] == ["bob"]
