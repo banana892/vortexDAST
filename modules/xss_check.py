@@ -56,6 +56,7 @@ from urllib.parse import urlencode, urlparse
 from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
 from core.cvss import build_vector, calculate as cvss_calc
+from core.json_fuzz import FuzzTarget, fuzz_targets_for
 from core.parser import ParsedForm, FormField
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,9 @@ class XSSCheckModule(BaseScannerModule):
 
         for form in endpoint.forms:
             findings.extend(self._fuzz_form(form, endpoint.url, baseline_body))
+
+        if endpoint.json_requests:
+            findings.extend(self._fuzz_json_requests(endpoint))
 
         return findings
 
@@ -297,6 +301,87 @@ class XSSCheckModule(BaseScannerModule):
                 findings.extend(all_findings)
 
         return findings
+
+    # ── Captured JSON API request fuzzing ─────────────────────────────────────
+
+    def _fuzz_json_requests(self, endpoint: CrawledEndpoint) -> List[Finding]:
+        """Inject canaries into every captured JSON request's body leaves and path segments."""
+        findings: List[Finding] = []
+
+        for captured in endpoint.json_requests:
+            baseline_body = self._fetch_json_baseline(captured.url, captured.body)
+
+            for target in fuzz_targets_for(captured):
+                quick_probes = self._probes[:_QUICK_PROBE_COUNT]
+                remaining_probes = self._probes[_QUICK_PROBE_COUNT:]
+
+                if self.quick_mode and quick_probes:
+                    quick_findings, any_reflected = self._probe_json_target_batch(
+                        target, quick_probes, baseline_body
+                    )
+                    findings.extend(quick_findings)
+                    if not any_reflected:
+                        continue
+                    if remaining_probes:
+                        full_findings, _ = self._probe_json_target_batch(
+                            target, remaining_probes, baseline_body
+                        )
+                        findings.extend(full_findings)
+                else:
+                    all_findings, _ = self._probe_json_target_batch(
+                        target, self._probes, baseline_body
+                    )
+                    findings.extend(all_findings)
+
+        return findings
+
+    def _probe_json_target_batch(
+        self,
+        target: FuzzTarget,
+        probes: List[Dict[str, Any]],
+        baseline_body: str,
+    ) -> Tuple[List[Finding], bool]:
+        """Run a batch of canaries against one JSON body leaf or path segment."""
+        findings: List[Finding] = []
+        any_reflected = False
+
+        def _run_probe(probe: Dict[str, Any]) -> Tuple[Optional[Finding], bool]:
+            # A body leaf's value is replaced outright (same as every other
+            # XSS probe in this module); a path segment has no full-replace
+            # form, so it falls back to appending, like sqli/nosql do.
+            if target.replace is not None:
+                fuzzed_url, fuzzed_json = target.replace(probe["value"])
+            else:
+                fuzzed_url, fuzzed_json = target.build(probe["value"])
+
+            response, error = self.requester.post(fuzzed_url, json=fuzzed_json)
+            if error or response is None:
+                logger.debug("xss POST (JSON) failed for %s: %s", fuzzed_url, error)
+                return None, False
+
+            body = response.text or ""
+            finding = self._check_reflection(
+                body=body,
+                baseline_body=baseline_body,
+                probe=probe,
+                url=fuzzed_url,
+                parameter=target.label,
+                method="POST (JSON)",
+            )
+            return finding, _probe_marker(probe["value"]) in body
+
+        if self.use_threads and len(probes) > 1:
+            tasks = [lambda p=probe: _run_probe(p) for probe in probes]
+            results = self.requester.dispatch_concurrent(tasks)
+        else:
+            results = [_run_probe(p) for p in probes]
+
+        for finding, marker_seen in results:
+            if finding is not None:
+                findings.append(finding)
+            any_reflected = any_reflected or marker_seen or finding is not None
+
+        return findings, any_reflected
 
     # ── Probe batch helpers ───────────────────────────────────────────────────
 
@@ -489,6 +574,14 @@ class XSSCheckModule(BaseScannerModule):
         response, error = self.requester.get(url)
         if error or response is None:
             logger.debug("xss_check: baseline fetch failed for %s: %s", url, error)
+            return ""
+        return response.text
+
+    def _fetch_json_baseline(self, url: str, json_data: Any) -> str:
+        """Fetch the unmodified captured JSON request for baseline suppression."""
+        response, error = self.requester.post(url, json=json_data)
+        if error or response is None:
+            logger.debug("xss_check: JSON baseline fetch failed for %s: %s", url, error)
             return ""
         return response.text
 

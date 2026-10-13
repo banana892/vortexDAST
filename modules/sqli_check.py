@@ -50,6 +50,7 @@ from urllib.parse import urlencode, urlparse
 from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
 from core.cvss import build_vector, calculate as cvss_calc
+from core.json_fuzz import FuzzTarget, fuzz_targets_for
 from core.parser import ParsedForm
 
 logger = logging.getLogger(__name__)
@@ -199,6 +200,10 @@ class SQLiCheckModule(BaseScannerModule):
         # ── POST forms ────────────────────────────────────────────────────
         for form in endpoint.forms:
             findings.extend(self._fuzz_form(form))
+
+        # ── Captured JSON API requests (body leaves + REST path segments) ─
+        if endpoint.json_requests:
+            findings.extend(self._fuzz_json_requests(endpoint))
 
         return findings
 
@@ -357,6 +362,124 @@ class SQLiCheckModule(BaseScannerModule):
                 findings.append(time_finding)
 
         return findings
+
+    # ── Captured JSON API request fuzzing ─────────────────────────────────────
+
+    def _fuzz_json_requests(self, endpoint: CrawledEndpoint) -> List[Finding]:
+        """
+        Inject boundary probes into every scalar leaf of each captured JSON
+        request's body, and into any REST-style path segment in its URL —
+        the same error-based/boolean-blind/time-based-blind analysis
+        already used for GET params and POST form fields, just reusing
+        ``core.json_fuzz``'s leaf/path-segment targets instead.
+        """
+        findings: List[Finding] = []
+
+        for captured in endpoint.json_requests:
+            baseline_response, baseline_body, baseline_status = self._post_json_baseline(
+                captured.url, captured.body
+            )
+            if baseline_response is None:
+                continue
+            if self._baseline_has_errors(baseline_body):
+                logger.debug(
+                    "sqli: JSON baseline already contains DB errors at %s — skipping",
+                    captured.url,
+                )
+                continue
+
+            for target in fuzz_targets_for(captured):
+                for probe in self._boundary_probes:
+                    fuzzed_url, fuzzed_json = target.build(probe["value"])
+                    response, error = self.requester.post(fuzzed_url, json=fuzzed_json)
+                    if error or response is None:
+                        continue
+
+                    finding = self._analyse_response(
+                        fuzzed_body=response.text,
+                        fuzzed_status=response.status_code,
+                        baseline_body=baseline_body,
+                        baseline_status=baseline_status,
+                        probe=probe,
+                        url=fuzzed_url,
+                        parameter=target.label,
+                        method="POST (JSON)",
+                    )
+                    if finding:
+                        findings.append(finding)
+
+                # shortcut: boolean/time-based blind need an "original value"
+                # to extend with a true/false SQL condition — meaningful for
+                # a body leaf, not for a REST path segment swap. Error-based
+                # coverage above already applies to both kinds of target.
+                if target.kind != "body":
+                    continue
+
+                blind_finding = self._boolean_blind_json_check(target, baseline_body)
+                if blind_finding:
+                    findings.append(blind_finding)
+
+                time_finding = self._time_based_blind_json_check(
+                    target, baseline_response.elapsed.total_seconds()
+                )
+                if time_finding:
+                    findings.append(time_finding)
+
+        return findings
+
+    def _boolean_blind_json_check(
+        self, target: FuzzTarget, baseline_body: str
+    ) -> Optional[Finding]:
+        """Always-true vs always-false Boolean probe pair against one JSON leaf."""
+        true_probe = next(
+            (p for p in self._boundary_probes if p.get("id") == "sqli_boolean_and_1eq1"), None
+        )
+        false_probe = next(
+            (p for p in self._boundary_probes if p.get("id") == "sqli_boolean_and_1eq2"), None
+        )
+        if not true_probe or not false_probe:
+            return None
+
+        true_url, true_json = target.build(true_probe["value"])
+        false_url, false_json = target.build(false_probe["value"])
+        true_resp, err1 = self.requester.post(true_url, json=true_json)
+        false_resp, err2 = self.requester.post(false_url, json=false_json)
+        if err1 or err2 or true_resp is None or false_resp is None:
+            return None
+
+        return self._evaluate_boolean_diff(
+            true_body=true_resp.text,
+            false_body=false_resp.text,
+            url=true_url,
+            parameter=target.label,
+            method="POST (JSON)",
+        )
+
+    def _time_based_blind_json_check(
+        self, target: FuzzTarget, baseline_elapsed: float
+    ) -> Optional[Finding]:
+        """Try each time-based probe against one JSON leaf until one reproduces its delay."""
+        for probe in self._time_based_probes:
+            fuzzed_url, fuzzed_json = target.build(probe["value"])
+            response, error = self.requester.post(fuzzed_url, json=fuzzed_json)
+            if error or response is None:
+                continue
+            elapsed = response.elapsed.total_seconds()
+
+            confirm_elapsed: Optional[float] = None
+            if self._exceeds_delay_threshold(elapsed, baseline_elapsed, probe):
+                confirm_response, confirm_error = self.requester.post(fuzzed_url, json=fuzzed_json)
+                if confirm_error or confirm_response is None:
+                    continue
+                confirm_elapsed = confirm_response.elapsed.total_seconds()
+
+            finding = self._evaluate_time_delay(
+                elapsed, confirm_elapsed, baseline_elapsed, probe,
+                fuzzed_url, target.label, "POST (JSON)",
+            )
+            if finding:
+                return finding
+        return None
 
     # ── Core response analyser ────────────────────────────────────────────────
 
@@ -823,6 +946,14 @@ class SQLiCheckModule(BaseScannerModule):
         response, error = self.requester.post(url, data=data)
         if error or response is None:
             logger.debug("sqli POST baseline fetch failed for %s: %s", url, error)
+            return None, "", 0
+        return response, response.text, response.status_code
+
+    def _post_json_baseline(self, url: str, json_data: Any) -> Tuple[Any, str, int]:
+        """Fetch the unmodified captured JSON request for baseline capture."""
+        response, error = self.requester.post(url, json=json_data)
+        if error or response is None:
+            logger.debug("sqli POST (JSON) baseline fetch failed for %s: %s", url, error)
             return None, "", 0
         return response, response.text, response.status_code
 

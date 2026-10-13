@@ -33,7 +33,8 @@ between what runs today and what is planned — see
 | **Tool orchestration** — 9 adapters: nuclei, nmap, httpx, ffuf, sqlmap, interactsh, nikto, testssl.sh, subfinder (`--tools`) | ✅ Shipped (opt-in) |
 | **Out-of-band (OAST)** testing for blind SSRF, RCE and SQLi (via interactsh) | ✅ Shipped (opt-in) |
 | **JavaScript / SPA rendering** (`--dynamic`, headless Chromium) | ✅ Shipped (opt-in) |
-| **API / OpenAPI import + JSON-body fuzzing** | 🚧 Planned |
+| **JSON API fuzzing** — captures `fetch`/XHR calls during `--dynamic` crawling and fuzzes their (nested) bodies + REST path segments | ✅ Shipped (opt-in, via `--dynamic`) |
+| **OpenAPI/Swagger/Postman spec import** | 🚧 Planned |
 
 ---
 

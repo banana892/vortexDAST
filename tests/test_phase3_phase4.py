@@ -28,7 +28,7 @@ import pytest
 # Allow imports from the project root.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from core.crawler import CrawledEndpoint
+from core.crawler import CapturedJsonRequest, CrawledEndpoint
 from core.parser import ParsedForm, FormField, ParsedLink
 from core.requester import Requester
 from modules.base import Confidence, Finding, Severity
@@ -58,6 +58,7 @@ def _make_endpoint(
     query_params: Dict[str, List[str]] | None = None,
     forms: List[ParsedForm] | None = None,
     links: List[ParsedLink] | None = None,
+    json_requests: List[CapturedJsonRequest] | None = None,
 ) -> CrawledEndpoint:
     return CrawledEndpoint(
         url=url,
@@ -67,6 +68,7 @@ def _make_endpoint(
         query_params=query_params or {},
         forms=forms or [],
         links=links or [],
+        json_requests=json_requests or [],
     )
 
 
@@ -590,6 +592,42 @@ class TestXSSCheckModule:
             assert f.parameter is not None
             assert f.payload is not None
 
+    # ── Captured JSON API request fuzzing ──────────────────────────────────
+
+    def test_json_body_leaf_reflection_detected(self) -> None:
+        module = self._module()
+        module.requester.get.return_value = (_mock_response("<html>unrelated</html>"), None)
+
+        def fake_post(url, **kwargs):
+            body = kwargs.get("json")
+            value = body.get("comment", "") if isinstance(body, dict) else ""
+            if "vdastXSS" in str(value):
+                return _mock_response(f"<html>Comment: {value}</html>"), None
+            return _mock_response("<html>Comment: hello</html>"), None
+
+        module.requester.post.side_effect = fake_post
+        captured = CapturedJsonRequest(
+            url="https://target.com/api/comments", method="POST", body={"comment": "hello"}
+        )
+        ep = _make_endpoint(json_requests=[captured])
+        findings = module.run(ep)
+
+        xss_findings = [f for f in findings if "XSS" in f.title]
+        assert len(xss_findings) >= 1
+        assert xss_findings[0].parameter == "body:comment"
+        assert xss_findings[0].extra["method"] == "POST (JSON)"
+
+    def test_no_reflection_in_json_body_yields_no_findings(self) -> None:
+        module = self._module()
+        module.requester.get.return_value = (_mock_response("<html>unrelated</html>"), None)
+        module.requester.post.return_value = (_mock_response("<html>No echo here</html>"), None)
+        captured = CapturedJsonRequest(
+            url="https://target.com/api/comments", method="POST", body={"comment": "hello"}
+        )
+        ep = _make_endpoint(json_requests=[captured])
+        findings = module.run(ep)
+        assert [f for f in findings if "XSS" in f.title] == []
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SQLiCheckModule tests
@@ -804,6 +842,68 @@ class TestSQLiCheckModule:
         ep = _make_endpoint(query_params={"id": ["1"]})
         findings = module.run(ep)
         assert [f for f in findings if "Time-Based" in f.title] == []
+
+    # ── Captured JSON API request fuzzing ──────────────────────────────────
+
+    def test_detects_error_in_captured_json_body_leaf(self) -> None:
+        module = self._module()
+        error_resp = _mock_response(
+            "<html>You have an error in your SQL syntax near '''' at line 1</html>",
+            status=500,
+        )
+        baseline_resp = _mock_response("<html>OK</html>")
+
+        def fake_post(url, **kwargs):
+            body = kwargs.get("json")
+            value = body.get("user", {}).get("name", "") if isinstance(body, dict) else ""
+            if "'" in str(value):
+                return error_resp, None
+            return baseline_resp, None
+
+        module.requester.post.side_effect = fake_post
+        captured = CapturedJsonRequest(
+            url="https://target.com/api/profile",
+            method="POST",
+            body={"user": {"name": "bob"}},
+        )
+        ep = _make_endpoint(json_requests=[captured])
+        findings = module.run(ep)
+
+        sqli_findings = [f for f in findings if "SQL Injection" in f.title]
+        assert len(sqli_findings) >= 1
+        assert sqli_findings[0].parameter == "body:user.name"
+        assert sqli_findings[0].extra["method"] == "POST (JSON)"
+
+    def test_json_path_segment_is_fuzzed(self) -> None:
+        module = self._module()
+        error_resp = _mock_response(
+            "<html>You have an error in your SQL syntax near '''' at line 1</html>",
+            status=500,
+        )
+        baseline_resp = _mock_response("<html>OK</html>")
+
+        def fake_post(url, **kwargs):
+            if url.endswith("42'"):
+                return error_resp, None
+            return baseline_resp, None
+
+        module.requester.post.side_effect = fake_post
+        captured = CapturedJsonRequest(
+            url="https://target.com/api/widgets/42", method="POST", body={"qty": 1}
+        )
+        ep = _make_endpoint(json_requests=[captured])
+        findings = module.run(ep)
+
+        path_findings = [f for f in findings if f.parameter and f.parameter.startswith("path:")]
+        assert len(path_findings) >= 1
+
+    def test_no_captured_json_requests_adds_nothing(self) -> None:
+        module = self._module()
+        module.requester.get.return_value = (_mock_response("<html>OK</html>"), None)
+        ep = _make_endpoint(query_params={"id": ["1"]})
+        findings = module.run(ep)
+        json_findings = [f for f in findings if "(JSON)" in (f.extra.get("method") or "")]
+        assert json_findings == []
 
     def test_baseline_request_failure_is_skipped_gracefully(self) -> None:
         module = self._module()

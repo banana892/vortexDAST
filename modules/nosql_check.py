@@ -49,6 +49,7 @@ from urllib.parse import urlencode, urlparse
 from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
 from core.cvss import build_vector, calculate as cvss_calc
+from core.json_fuzz import FuzzTarget, fuzz_targets_for
 from core.parser import ParsedForm
 
 logger = logging.getLogger(__name__)
@@ -132,6 +133,9 @@ class NoSQLCheckModule(BaseScannerModule):
         for form in endpoint.forms:
             findings.extend(self._fuzz_form(form))
             findings.extend(self._fuzz_json_body(form))
+
+        if endpoint.json_requests:
+            findings.extend(self._fuzz_json_requests(endpoint))
 
         return findings
 
@@ -303,6 +307,79 @@ class NoSQLCheckModule(BaseScannerModule):
 
         return self._evaluate_operator_diff(
             true_body, false_body, baseline_body, url, target_field, "POST (JSON)",
+            true_probe["operator"], false_probe["operator"],
+        )
+
+    # ── Captured JSON API request fuzzing ─────────────────────────────────────
+    #
+    # The above operates on a flat body *synthesized* from an HTML form's own
+    # fields (forms have no nesting to begin with). The methods below instead
+    # fuzz a captured *real* API request (core.crawler.CapturedJsonRequest,
+    # from core.dom_watcher's passive fetch/XHR capture), which can be
+    # genuinely nested — hence the shared core.json_fuzz leaf-walker.
+
+    def _fuzz_json_requests(self, endpoint: CrawledEndpoint) -> List[Finding]:
+        """Error-based + operator-differential fuzzing of every captured JSON request."""
+        findings: List[Finding] = []
+
+        for captured in endpoint.json_requests:
+            baseline_body = self._post_json_body(captured.url, captured.body)
+            if baseline_body is None or self._baseline_has_errors(baseline_body):
+                continue
+
+            for target in fuzz_targets_for(captured):
+                for probe in self._boundary_probes:
+                    fuzzed_url, fuzzed_json = target.build(probe["value"])
+                    body = self._post_json_body(fuzzed_url, fuzzed_json)
+                    if body is None:
+                        continue
+                    finding = self._analyse_error(
+                        body, baseline_body, probe, fuzzed_url, target.label, "POST (JSON)"
+                    )
+                    if finding:
+                        findings.append(finding)
+                        break
+
+                # Operator-injection replaces the leaf's *value* with an
+                # object ({"$ne": ...}) — only a body leaf supports that; a
+                # URL path segment can't hold a non-string JSON value.
+                if target.kind != "body":
+                    continue
+
+                op_finding = self._operator_differential_json_target(target, baseline_body)
+                if op_finding:
+                    findings.append(op_finding)
+
+                regex_finding = self._operator_differential_json_target(
+                    target, baseline_body, pair=self._regex_operator_pair()
+                )
+                if regex_finding:
+                    findings.append(regex_finding)
+
+        return findings
+
+    def _operator_differential_json_target(
+        self,
+        target: FuzzTarget,
+        baseline_body: str,
+        pair: Optional[Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
+    ) -> Optional[Finding]:
+        if target.replace is None:
+            return None
+        true_probe, false_probe = pair if pair else self._json_operator_pair()
+        if not true_probe or not false_probe:
+            return None
+
+        true_url, true_json = target.replace({true_probe["operator"]: true_probe["value"]})
+        false_url, false_json = target.replace({false_probe["operator"]: false_probe["value"]})
+
+        true_body = self._post_json_body(true_url, true_json)
+        false_body = self._post_json_body(false_url, false_json)
+        if true_body is None or false_body is None:
+            return None
+
+        return self._evaluate_operator_diff(
+            true_body, false_body, baseline_body, true_url, target.label, "POST (JSON)",
             true_probe["operator"], false_probe["operator"],
         )
 

@@ -201,8 +201,8 @@ own quality:
   unauthenticated (doesn't carry the scan's cookie jar into the browser
   context yet — that's the authenticated-scanning follow-up below, not
   done here).
-- **API testing** — 🚧 *discovery shipped, fuzzing not started.* Until now
-  nothing in the crawl/parse pipeline carried a JSON body, a content-type,
+- **API testing** — 🚧 *discovery + fuzzing shipped; spec import still
+  open.* Until now nothing in the crawl/parse pipeline carried a JSON body, a content-type,
   or a REST path-param concept: `CrawledEndpoint` (`core/crawler.py`) had
   only `forms`/`links`/`query_params`, and `ParsedForm` (`core/parser.py`)
   is HTML-input-shaped. The one piece of prior art, `nosql_check.py`'s
@@ -228,22 +228,43 @@ own quality:
      Verified against a real headless-Chromium run (`tests/test_dom_watcher.py`):
      a fixture page's inline `fetch()` POST is captured as a synthetic
      `/api/widgets` endpoint carrying the exact JSON body sent.
-  2. 🚧 *not started:* **Fuzzing — generalize the per-param pattern onto
-     JSON leaves and REST path segments**, reusing each module's *existing* probe sets rather
-     than adding new ones. A new shared `core/json_fuzz.py` walks a nested
-     JSON body into `(json-pointer-path, value)` leaves and rebuilds the
-     body with one leaf substituted at a time — the JSON equivalent of what
-     `sqli_check`/`xss_check`/`nosql_check` already do for query params and
-     form fields. The IDOR-style "looks like an object reference"
-     ID/UUID-segment regex already in `access_control.py` gets extracted
-     into a shared helper so the same modules can also flag and fuzz
-     path segments (`/users/{id}`) inside a captured request's URL.
-     `BaseScannerModule.run(endpoint)` keeps its single signature — no new
-     module-interface hook, just one more source each already-fuzzing
-     module iterates (`endpoint.json_requests`, alongside `endpoint.forms`
-     today). `nosql_check.py`'s flat form-to-JSON hack gets rebuilt on top
-     of the same shared leaf-walker so it gains nesting instead of staying
-     a one-off.
+  2. ✅ *shipped:* **Fuzzing — generalize the per-param pattern onto JSON
+     leaves and REST path segments**, reusing each module's *existing*
+     probe sets rather than adding new ones. The new shared
+     `core/json_fuzz.py` walks a nested JSON body into
+     ``(path, value)`` leaves (`walk_json_leaves`/`render_path`, e.g.
+     `items[0].qty`) and rebuilds the body with one leaf substituted at a
+     time (`set_leaf`), and separately finds REST-style path segments that
+     look like an object reference — numeric or UUID-shaped
+     (`looks_like_object_reference`/`find_fuzzable_path_segments`), the
+     same spirit as the numeric-ID heuristic `access_control_check.py`
+     already uses for query parameters, extended with UUID detection since
+     a path segment carries no parameter name to check against a curated
+     list. Both are exposed as uniform `FuzzTarget`s
+     (`fuzz_targets_for`) so `sqli_check`/`nosql_check`/`xss_check` each
+     added one `_fuzz_json_requests(endpoint)` method that iterates
+     `endpoint.json_requests` and feeds every target through their
+     *existing* analysis methods unchanged (`_analyse_response`,
+     `_evaluate_boolean_diff`, `_evaluate_time_delay` for sqli;
+     `_analyse_error`, `_evaluate_operator_diff` for nosql;
+     `_check_reflection` for xss). `BaseScannerModule.run(endpoint)` keeps
+     its single signature — no new module-interface hook.
+     Operator-injection and boolean/time-based blind checks only run
+     against body leaves (`FuzzTarget.kind == "body"`), since replacing a
+     leaf's value with `{"$ne": ...}` or extending it with a true/false SQL
+     condition has no equivalent for a URL path segment; error-based
+     coverage still runs against both kinds. `DEFAULT_MAX_LEAVES` (15)
+     bounds per-request volume, same concern as every other adapter's own
+     cap. **Correction from the original scope above:** `nosql_check.py`'s
+     pre-existing flat form-to-JSON hack (`_fuzz_json_body`) was left as
+     its own thing rather than rebuilt on the leaf-walker — an HTML form's
+     fields are flat by construction, so walking them as a tree would add
+     a leaf-walk with no actual nesting to gain; the leaf-walker's value is
+     specifically for the genuinely-nested bodies Phase 1 captures from
+     real page JS, which `_fuzz_json_requests` targets instead.
+     `tests/test_json_fuzz.py` covers the primitives directly; each
+     module's own test file covers the wiring (nested-leaf error/operator
+     detection, path-segment fuzzing, boolean-/time-based blind on a leaf).
   3. **Spec import (OpenAPI/Swagger/Postman) — explicitly deferred**, a
      separate follow-up phase: a different input source (a file, not a
      crawl) that would feed the *same* `json_requests` discovery list, so
@@ -511,3 +532,17 @@ Ordered by impact; several are now *resolved by the plan above*.
   `CapturedJsonRequest`/`json_requests` field. `--no-json-fuzz` /
   `crawler.json_fuzz` opt out. The fuzzing half (JSON-leaf and REST
   path-segment substitution) and spec import remain open.
+- 2026-10-13 — Phase D API testing, fuzzing half shipped: new shared
+  `core/json_fuzz.py` (leaf-walker + REST path-segment detection, exposed
+  as uniform `FuzzTarget`s) lets `sqli_check`/`nosql_check`/`xss_check`
+  each fuzz captured JSON requests' (possibly nested) bodies and
+  object-reference-shaped path segments through their own existing
+  analysis methods — no new detection logic, no new module-interface hook.
+  Operator-injection and boolean-/time-based blind checks run against body
+  leaves only; error-based/reflection checks run against both leaves and
+  path segments. `nosql_check.py`'s pre-existing flat form-to-JSON hack
+  was deliberately left alone rather than forced onto the leaf-walker — a
+  form's fields are flat by construction, so there's no real nesting to
+  gain there; the leaf-walker's value is for the genuinely-nested bodies
+  Phase 1 captures from real page JS. Only OpenAPI/Swagger/Postman spec
+  import remains open for Phase D's "API testing" item.

@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from core.crawler import CrawledEndpoint
+from core.crawler import CapturedJsonRequest, CrawledEndpoint
 from core.parser import FormField, ParsedForm
 from core.requester import Requester
 from modules.base import Confidence, Severity
@@ -216,3 +216,81 @@ class TestPost:
         op_findings = [f for f in findings if f.confidence == Confidence.TENTATIVE]
         assert len(op_findings) == 1
         assert op_findings[0].extra["method"] == "POST"
+
+
+class TestJsonRequests:
+    """Fuzzing of captured JSON API requests (core.crawler.CapturedJsonRequest)."""
+
+    def _captured(self, url: str = "https://target.com/api/profile") -> CapturedJsonRequest:
+        return CapturedJsonRequest(url=url, method="POST", body={"user": {"name": "bob"}})
+
+    def test_error_based_on_nested_json_leaf(self) -> None:
+        req = _mock_requester()
+
+        def fake_post(url: str, *a, **kwargs):
+            body = kwargs.get("json")
+            value = body.get("user", {}).get("name") if isinstance(body, dict) else None
+            if isinstance(value, str) and "{" in value:
+                return (_mock_response("<p>MongoError: bad query</p>"), None)
+            return (_mock_response("<p>baseline ok</p>"), None)
+
+        req.post.side_effect = fake_post
+        mod = NoSQLCheckModule(req)
+        ep = _endpoint()
+        ep.json_requests = [self._captured()]
+        findings = mod.run(ep)
+
+        error_findings = [f for f in findings if "NoSQL Injection" in f.title]
+        assert len(error_findings) >= 1
+        assert error_findings[0].parameter == "body:user.name"
+        assert error_findings[0].extra["method"] == "POST (JSON)"
+
+    def test_operator_differential_on_json_leaf(self) -> None:
+        req = _mock_requester()
+
+        def fake_post(url: str, *a, **kwargs):
+            body = str(kwargs.get("json"))
+            if "$ne" in body:
+                return (_mock_response("<p>" + "X" * 500 + "</p>"), None)
+            if "$eq" in body:
+                return (_mock_response("<p>short</p>"), None)
+            return (_mock_response("<p>baseline</p>"), None)
+
+        req.post.side_effect = fake_post
+        mod = NoSQLCheckModule(req)
+        ep = _endpoint()
+        ep.json_requests = [self._captured()]
+        findings = mod.run(ep)
+
+        op_findings = [
+            f for f in findings
+            if f.confidence == Confidence.TENTATIVE and f.extra.get("method") == "POST (JSON)"
+        ]
+        assert len(op_findings) == 1
+        assert op_findings[0].parameter == "body:user.name"
+
+    def test_path_segment_fuzzed_for_errors(self) -> None:
+        req = _mock_requester()
+
+        def fake_post(url: str, *a, **kwargs):
+            if "{" in url:
+                return (_mock_response("<p>MongoError: bad query</p>"), None)
+            return (_mock_response("<p>baseline ok</p>"), None)
+
+        req.post.side_effect = fake_post
+        mod = NoSQLCheckModule(req)
+        ep = _endpoint()
+        ep.json_requests = [self._captured(url="https://target.com/api/widgets/42")]
+        findings = mod.run(ep)
+
+        path_findings = [f for f in findings if f.parameter and f.parameter.startswith("path:")]
+        assert len(path_findings) >= 1
+
+    def test_no_json_requests_is_a_no_op(self) -> None:
+        req = _mock_requester()
+        req.get.return_value = (_mock_response("<p>baseline</p>"), None)
+        mod = NoSQLCheckModule(req)
+        ep = _endpoint(query_params={"user": ["bob"]})
+        assert ep.json_requests == []
+        findings = mod.run(ep)
+        assert all(f.extra.get("method") != "POST (JSON)" for f in findings)
