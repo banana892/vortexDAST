@@ -396,8 +396,10 @@ Ordered by impact; several are now *resolved by the plan above*.
 2. **No JS/SPA rendering** — ✅ *resolved by Phase D* (`DomWatcher`,
    `--dynamic`). A thin static-only result is still possible if `--dynamic`
    is left off, but it's no longer the only option.
-3. **No API / JSON-body testing** — most modules fuzz only query params and
-   HTML form fields. **Phase D.**
+3. **No API / JSON-body testing** — ✅ *resolved by Phase D.* Captured
+   `--dynamic` JSON requests and imported OpenAPI/Swagger/Postman specs
+   both feed `sqli_check`/`nosql_check`/`xss_check`'s JSON-leaf and
+   REST-path-segment fuzzing (`core/json_fuzz.py`).
 4. **No OAST** — blind SSRF/SQLi/RCE/XXE undetectable. **✅ Blind SSRF, SQLi
    (MSSQL/Oracle) and RCE resolved by Phase C** (`interactsh` adapter, GET
    query parameters). Blind XXE still has no OOB confirmation path — it
