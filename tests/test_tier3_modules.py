@@ -362,6 +362,73 @@ class TestTraversalCheckModule:
         # Should be exactly 1 finding for 'file' param.
         assert len(findings) == 1
 
+    # ── POST form fields (§5 item 6: "traversal_check is still GET-only") ──
+
+    def test_post_form_field_confirmed_finding(self) -> None:
+        """A POST form's own field is fuzzed via POST, not just GET params."""
+        mod, req = self._make_module()
+        passwd_body = "root:x:0:0:root:/root:/bin/bash\n"
+        baseline_resp = _make_mock_response("Clean baseline")
+        fuzz_resp = _make_mock_response(passwd_body)
+        req.post.side_effect = [
+            (baseline_resp, None),  # POST baseline
+            (fuzz_resp, None),      # first probe that matches
+        ]
+
+        form = _make_form(
+            "http://t.com/download", method="POST",
+            fields=[_make_field("file", field_type="text", value="report.pdf")],
+        )
+        ep = _make_endpoint("http://t.com/page", forms=[form])
+        findings = mod.run(ep)
+
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.parameter == "file"
+        assert f.url == "http://t.com/download"
+        assert f.extra.get("method") == "POST"
+        req.get.assert_not_called()  # no GET candidates on this endpoint at all
+
+    def test_post_baseline_match_suppresses_finding(self) -> None:
+        """POST baseline already matching a pattern must not fire (FP guard)."""
+        mod, req = self._make_module()
+        passwd_body = "root:x:0:0:root:/root:/bin/bash\n"
+        req.post.return_value = (_make_mock_response(passwd_body), None)
+
+        form = _make_form(
+            "http://t.com/download", method="POST",
+            fields=[_make_field("file", field_type="text", value="report.pdf")],
+        )
+        ep = _make_endpoint("http://t.com/page", forms=[form])
+        findings = mod.run(ep)
+        assert findings == []
+
+    def test_post_form_with_no_named_fields_skipped(self) -> None:
+        mod, req = self._make_module()
+        form = _make_form("http://t.com/download", method="POST", fields=[])
+        ep = _make_endpoint("http://t.com/page", forms=[form])
+        assert mod.run(ep) == []
+        req.post.assert_not_called()
+
+    def test_get_and_post_candidates_both_run(self) -> None:
+        """A page with both a query param and a POST form fuzzes both shapes."""
+        mod, req = self._make_module()
+        clean = _make_mock_response("Clean")
+        req.get.return_value = (clean, None)
+        req.post.return_value = (clean, None)
+
+        form = _make_form(
+            "http://t.com/download", method="POST",
+            fields=[_make_field("file", field_type="text", value="report.pdf")],
+        )
+        ep = _make_endpoint(
+            "http://t.com/page", query_params={"q": ["hello"]}, forms=[form]
+        )
+        mod.run(ep)
+
+        req.get.assert_called()
+        req.post.assert_called()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TestCSRFCheckModule

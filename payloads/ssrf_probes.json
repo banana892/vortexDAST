@@ -1,15 +1,8 @@
 {
   "meta": {
-    "description": "Benign SSRF detection probes. These target safe loopback and internal addresses. They carry no risk against external public targets but will reveal whether the server makes outbound connections to internal resources on behalf of user-supplied input.",
+    "description": "Benign SSRF detection probes. These target safe loopback and internal addresses. They carry no risk against external public targets but will reveal whether the server makes outbound connections to internal resources on behalf of user-supplied input. Run against every discovered parameter (no name-gating) — the three response signals (status change, timing delta, body marker), not the parameter's name, are what keep this precise.",
     "safe": true
   },
-  "url_parameter_keywords": [
-    "url", "dest", "destination", "redirect", "redirect_uri", "redirect_url",
-    "return", "return_url", "returnurl", "src", "source", "link", "href",
-    "path", "uri", "page", "fetch", "load", "download", "proxy", "host",
-    "site", "callback", "next", "forward", "target", "image", "img",
-    "file", "open", "ref", "referer"
-  ],
   "loopback_probes": [
     {
       "id": "ssrf_ipv4_loopback_80",

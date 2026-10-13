@@ -508,17 +508,34 @@ Ordered by impact; several are now *resolved by the plan above*.
    - All four are auto-discovered by `scanner.py`'s existing
      `MODULE_REGISTRY` machinery with zero wiring changes, same as every
      other module.
-6. **Shallow detectors** — ✅ *time-based blind SQLi resolved.* `sqli_check`
-   now runs a dedicated time-based heuristic (GET params and POST/form
-   fields) alongside its existing error-based and boolean-blind checks:
-   four DBMS-specific delay payloads (MySQL `SLEEP()`, PostgreSQL
-   `pg_sleep()`, MSSQL `WAITFOR DELAY`, Oracle's privilege-free
-   cartesian-product stall) in `payloads/sqli_probes.json`, flagged only
-   when the measured delay clears both a relative (60% of the payload's own
-   injected delay) and an absolute (2s) threshold *and* reproduces on a
-   second confirmation request — so ordinary network/CDN jitter on a slow
-   target can't masquerade as an injected delay. `traversal_check` is still
-   GET-only; `ssrf_check` is still keyword-gated.
+6. **Shallow detectors** — ✅ *all three resolved.*
+   - *Time-based blind SQLi:* `sqli_check` runs a dedicated time-based
+     heuristic (GET params and POST/form fields) alongside its existing
+     error-based and boolean-blind checks: four DBMS-specific delay
+     payloads (MySQL `SLEEP()`, PostgreSQL `pg_sleep()`, MSSQL
+     `WAITFOR DELAY`, Oracle's privilege-free cartesian-product stall) in
+     `payloads/sqli_probes.json`, flagged only when the measured delay
+     clears both a relative (60% of the payload's own injected delay) and
+     an absolute (2s) threshold *and* reproduces on a second confirmation
+     request — so ordinary network/CDN jitter on a slow target can't
+     masquerade as an injected delay.
+   - *`traversal_check` was GET-only* — ✅ *fixed.* Every POST form now
+     gets its own baseline POST (its own fields, unmodified) and each
+     field is then fuzzed via POST against that same baseline, through a
+     new shared `_probe_param` helper that both the GET and POST paths
+     call — same false-positive guards (baseline-pattern skip, HTTP ≥500
+     skip, one finding per `(url, param)`) on both paths. GET-param/
+     GET-form coverage is unchanged.
+   - *`ssrf_check` was keyword-gated* — ✅ *fixed.* It used to only test
+     GET/link/form parameters whose *name* matched an SSRF-indicative
+     keyword list (`url`, `redirect`, `dest`, …), so a vulnerable parameter
+     with an unexpected name (e.g. a generic `q`) was never probed at all.
+     The gate (`_is_ssrf_candidate`/`_filter_candidates`/
+     `_filter_form_candidates`, plus `url_parameter_keywords` in
+     `payloads/ssrf_probes.json`) is removed entirely — every parameter is
+     now a candidate, same as `sqli_check`/`command_injection_check`
+     already do. The three response signals (status change, timing delta,
+     body marker) are what keep this precise, not the parameter's name.
 
 ### Operational / safety (independent of the toolset)
 
@@ -743,3 +760,12 @@ Ordered by impact; several are now *resolved by the plan above*.
   `core/parser.py`'s `_extract_field` was unconditionally dropping every
   `<input type="file">`, so no module could ever have found an upload form
   at all — fixed to keep it as `field_type="file"`.
+- 2026-10-14 — §5 item 6 "shallow detectors" closed, the last open item in
+  that section: `traversal_check` gained POST-form coverage (a new shared
+  `_probe_param` helper backs both the existing GET path and a new POST
+  path, each with its own baseline and the same false-positive guards), and
+  `ssrf_check`'s keyword-gating was removed entirely — every GET/link/form
+  parameter is now a candidate, not just ones whose name matched an
+  SSRF-indicative keyword list. Verified end-to-end against a local server:
+  a POST form's `file` field now reports LFI, and a GET parameter named `q`
+  (matching no keyword) now reports SSRF.

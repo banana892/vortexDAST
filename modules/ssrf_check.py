@@ -5,11 +5,16 @@ Server-Side Request Forgery (SSRF) Heuristic Detection Module.
 
 Detection Strategy
 ------------------
-1.  Load loopback probe URLs and URL-parameter keyword list from
-    ``payloads/ssrf_probes.json``.
-2.  **Candidate parameter identification** — filter all discovered GET query
-    parameters and POST form fields whose *name* fuzzy-matches one of the
-    SSRF-indicative keywords (e.g. ``url``, ``dest``, ``redirect``, ``src``).
+1.  Load loopback probe URLs from ``payloads/ssrf_probes.json``.
+2.  **Every** discovered GET query parameter, link parameter, and POST form
+    field is a candidate — no name-gating. This used to filter down to
+    parameters whose *name* fuzzy-matched an SSRF-indicative keyword (e.g.
+    ``url``, ``dest``, ``redirect``, ``src``), which is the module's own
+    "still keyword-gated" follow-up from the roadmap (§5 item 6): a
+    vulnerable parameter with an unexpected name (``path``, ``q``, a custom
+    field) was never tested at all. The three signals below — not the
+    parameter's name — are what keep this precise; sqli_check and
+    command_injection_check fuzz every parameter the same way.
 3.  For each candidate parameter:
       a. Fetch a **baseline** response (original value, original URL) to
          record the status code, body length, and response time.
@@ -174,7 +179,7 @@ class SSRFCheckModule(BaseScannerModule):
         """
         super().__init__(requester)
         path = payloads_path or _SSRF_PROBES_PATH
-        self._keyword_set, self._loopback_probes = _load_ssrf_probes(path)
+        self._loopback_probes = _load_ssrf_probes(path)
         self._timing_threshold = timing_threshold_s
 
     # ── Public entry point ────────────────────────────────────────────────────
@@ -200,66 +205,27 @@ class SSRFCheckModule(BaseScannerModule):
             return findings
 
         # ── GET parameters (endpoint's own URL) ───────────────────────────
-        candidate_get_params = self._filter_candidates(endpoint.query_params)
-        if candidate_get_params:
+        if endpoint.query_params:
             findings.extend(
-                self._fuzz_get_params(endpoint.url, endpoint.query_params, candidate_get_params)
+                self._fuzz_get_params(
+                    endpoint.url, endpoint.query_params, set(endpoint.query_params)
+                )
             )
 
         # ── GET parameters from discovered links ───────────────────────────
         for link in endpoint.links:
-            candidates = self._filter_candidates(link.query_params)
-            if candidates:
+            if link.query_params:
                 findings.extend(
-                    self._fuzz_get_params(link.url, link.query_params, candidates)
+                    self._fuzz_get_params(link.url, link.query_params, set(link.query_params))
                 )
 
         # ── POST form fields ───────────────────────────────────────────────
         for form in endpoint.forms:
-            form_candidates = self._filter_form_candidates(form)
-            if form_candidates:
-                findings.extend(self._fuzz_form(form, form_candidates))
+            field_names = {f.name for f in form.fields if f.name}
+            if field_names:
+                findings.extend(self._fuzz_form(form, field_names))
 
         return findings
-
-    # ── Candidate identification ──────────────────────────────────────────────
-
-    def _filter_candidates(
-        self, params: Dict[str, List[str]]
-    ) -> Set[str]:
-        """
-        Return the subset of parameter *names* that match SSRF-indicative
-        keywords (case-insensitive substring match).
-        """
-        candidates: Set[str] = set()
-        for param_name in params:
-            if self._is_ssrf_candidate(param_name):
-                candidates.add(param_name)
-        return candidates
-
-    def _filter_form_candidates(self, form: ParsedForm) -> Set[str]:
-        """Return field names from a form that are SSRF-candidate parameters."""
-        return {
-            f.name for f in form.fields if self._is_ssrf_candidate(f.name)
-        }
-
-    def _is_ssrf_candidate(self, param_name: str) -> bool:
-        """
-        Return True if ``param_name`` is an SSRF-indicative parameter name.
-
-        Uses both exact keyword matching and substring containment so that
-        variants like ``redirect_url``, ``next_url``, or ``src_url`` are
-        caught alongside exact matches like ``url`` or ``dest``.
-        """
-        lower = param_name.lower()
-        # Exact match
-        if lower in self._keyword_set:
-            return True
-        # Substring containment — catches url_param, redirect_to, img_url, etc.
-        for keyword in self._keyword_set:
-            if keyword in lower:
-                return True
-        return False
 
     # ── GET parameter fuzzing ─────────────────────────────────────────────────
 
@@ -597,35 +563,26 @@ class SSRFCheckModule(BaseScannerModule):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _load_ssrf_probes(
-    path: str,
-) -> Tuple[Set[str], List[Dict[str, Any]]]:
+def _load_ssrf_probes(path: str) -> List[Dict[str, Any]]:
     """
-    Load SSRF probe definitions from JSON.
+    Load SSRF loopback probe definitions from JSON.
 
     Returns
     -------
-    (keyword_set, loopback_probes)
-        ``keyword_set``     – lower-cased parameter keyword strings for candidate filtering
-        ``loopback_probes`` – list of probe dicts with ``id``, ``value``, ``description``
+    list[dict]
+        Probe dicts with ``id``, ``value``, ``description``.
     """
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
         logger.error("ssrf_probes.json not found at %s", path)
-        return set(), []
+        return []
     except json.JSONDecodeError as exc:
         logger.error("ssrf_probes.json parse error: %s", exc)
-        return set(), []
+        return []
 
-    keyword_set: Set[str] = {
-        kw.lower() for kw in data.get("url_parameter_keywords", [])
-    }
     loopback_probes: List[Dict[str, Any]] = data.get("loopback_probes", [])
 
-    logger.debug(
-        "ssrf_check: loaded %d keywords, %d probes from %s",
-        len(keyword_set), len(loopback_probes), path,
-    )
-    return keyword_set, loopback_probes
+    logger.debug("ssrf_check: loaded %d probes from %s", len(loopback_probes), path)
+    return loopback_probes

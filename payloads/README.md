@@ -20,7 +20,7 @@ text body only, never executable content) — see their own `meta.description`.
 | `sqli_probes.json` | `sqli_check` | SQL boundary chars + DBMS error regexes | Error must be *absent from baseline* to count |
 | `nosql_probes.json` | `nosql_check` | NoSQL boundary chars, `$ne`/`$eq` operators, driver-error regexes | Operator findings are `tentative`; errors must be new vs. baseline |
 | `ssti_probes.json` | `template_injection` | Arithmetic polyglots (`191*7`) per template engine | Only the *computed* result (marker-wrapped) counts, not literal reflection |
-| `ssrf_probes.json` | `ssrf_check` | Callback / internal-address probes | — |
+| `ssrf_probes.json` | `ssrf_check` | Callback / internal-address probes | Run against every parameter (no name-gating) — the response signals, not the name, keep it precise |
 | `traversal_probes.json` | `traversal_check` | Path-traversal sequences + file signatures | — |
 | `common_paths.json` | `dir_fuzzer` | Sensitive-file / directory wordlist | Soft-404 detection filters catch-all responses |
 | `common_params.json` | `param_fuzzer` | Hidden-parameter name wordlist | Second baseline measures natural page jitter |

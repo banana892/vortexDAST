@@ -108,120 +108,81 @@ def _make_finding(
 
 class TestSSRFPayloadLoader:
 
-    def test_loads_keywords_and_probes(self) -> None:
-        keywords, probes = _load_ssrf_probes(_SSRF_PROBES_PATH)
-        assert len(keywords) > 0
+    def test_loads_probes(self) -> None:
+        probes = _load_ssrf_probes(_SSRF_PROBES_PATH)
         assert len(probes) > 0
 
-    def test_keywords_are_lowercase(self) -> None:
-        keywords, _ = _load_ssrf_probes(_SSRF_PROBES_PATH)
-        for kw in keywords:
-            assert kw == kw.lower(), f"Keyword '{kw}' is not lowercase"
-
     def test_probes_have_required_fields(self) -> None:
-        _, probes = _load_ssrf_probes(_SSRF_PROBES_PATH)
+        probes = _load_ssrf_probes(_SSRF_PROBES_PATH)
         for probe in probes:
             assert "id" in probe
             assert "value" in probe
             assert "description" in probe
 
     def test_probes_contain_loopback_addresses(self) -> None:
-        _, probes = _load_ssrf_probes(_SSRF_PROBES_PATH)
+        probes = _load_ssrf_probes(_SSRF_PROBES_PATH)
         values = [p["value"] for p in probes]
         assert any("127.0.0.1" in v for v in values)
         assert any("localhost" in v for v in values)
 
-    def test_keywords_contain_expected_values(self) -> None:
-        keywords, _ = _load_ssrf_probes(_SSRF_PROBES_PATH)
-        for expected in ("url", "dest", "redirect", "src", "callback"):
-            assert expected in keywords, f"'{expected}' missing from keyword set"
-
     def test_missing_file_returns_empty(self) -> None:
-        keywords, probes = _load_ssrf_probes("/nonexistent/ssrf.json")
-        assert keywords == set()
-        assert probes == []
+        assert _load_ssrf_probes("/nonexistent/ssrf.json") == []
 
     def test_invalid_json_returns_empty(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
             f.write("{invalid json")
             tmp_path = f.name
         try:
-            keywords, probes = _load_ssrf_probes(tmp_path)
-            assert keywords == set()
-            assert probes == []
+            assert _load_ssrf_probes(tmp_path) == []
         finally:
             os.unlink(tmp_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SSRFCheckModule — candidate identification
+# SSRFCheckModule — every parameter is a candidate (§5 item 6: no name-gating)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestSSRFCandidateIdentification:
+class TestSSRFEveryParamFuzzed:
 
     def _module(self) -> SSRFCheckModule:
         return SSRFCheckModule(_mock_requester(), payloads_path=_SSRF_PROBES_PATH)
 
-    def test_url_param_is_candidate(self) -> None:
+    def test_non_keyword_named_param_is_still_fuzzed(self) -> None:
+        """A param whose name matches no keyword (e.g. 'q') is still probed."""
         m = self._module()
-        assert m._is_ssrf_candidate("url") is True
+        m.requester.get.return_value = (_mock_response("<html>OK</html>", 200), None)
+        ep = _make_endpoint(query_params={"q": ["search term"]})
+        m.run(ep)
+        # Every loopback probe issued a fuzzed request for 'q', proving it
+        # was not filtered out by name.
+        assert m.requester.get.call_count >= len(m._loopback_probes)
 
-    def test_dest_param_is_candidate(self) -> None:
+    def test_non_keyword_named_param_can_still_fire(self) -> None:
+        """A real anomaly on a non-keyword-named param must still be reported."""
         m = self._module()
-        assert m._is_ssrf_candidate("dest") is True
 
-    def test_redirect_param_is_candidate(self) -> None:
-        m = self._module()
-        assert m._is_ssrf_candidate("redirect") is True
+        def fake_get(url: str, **kwargs):
+            if "127.0.0.1" in url or "localhost" in url or "metadata" in url or "169.254" in url:
+                return (_mock_response("ami-id: ami-0abcdef1234567890", 200), None)
+            return (_mock_response("<html>OK</html>", 200), None)
 
-    def test_src_param_is_candidate(self) -> None:
-        m = self._module()
-        assert m._is_ssrf_candidate("src") is True
+        m.requester.get.side_effect = fake_get
+        ep = _make_endpoint(query_params={"q": ["search term"]})
+        findings = m.run(ep)
+        assert any(f.severity == Severity.HIGH for f in findings)
 
-    def test_generic_param_not_candidate(self) -> None:
+    def test_form_field_with_no_keyword_name_is_fuzzed(self) -> None:
         m = self._module()
-        assert m._is_ssrf_candidate("username") is False
-
-    def test_page_param_not_candidate(self) -> None:
-        # 'page' is in the keyword list — should be candidate
-        m = self._module()
-        assert m._is_ssrf_candidate("page") is True
-
-    def test_url_prefix_variant_is_candidate(self) -> None:
-        # 'img_url' contains 'url' → candidate
-        m = self._module()
-        assert m._is_ssrf_candidate("img_url") is True
-
-    def test_redirect_to_is_candidate(self) -> None:
-        m = self._module()
-        assert m._is_ssrf_candidate("redirect_to") is True
-
-    def test_filter_candidates_from_params(self) -> None:
-        m = self._module()
-        params = {
-            "url": ["http://example.com"],
-            "username": ["admin"],
-            "callback": ["http://cb.com"],
-        }
-        candidates = m._filter_candidates(params)
-        assert "url" in candidates
-        assert "callback" in candidates
-        assert "username" not in candidates
-
-    def test_filter_form_candidates(self) -> None:
-        m = self._module()
+        m.requester.post.return_value = (_mock_response("<html>OK</html>", 200), None)
         form = ParsedForm(
-            action_url="https://target.com/fetch",
+            action_url="https://target.com/submit",
             method="POST",
-            fields=[
-                FormField(name="dest_url", field_type="text", default_value=""),
-                FormField(name="email", field_type="email", default_value=""),
-            ],
+            fields=[FormField(name="comment", field_type="text", default_value="")],
         )
-        candidates = m._filter_form_candidates(form)
-        assert "dest_url" in candidates
-        assert "email" not in candidates
+        ep = _make_endpoint(forms=[form])
+        m.run(ep)
+        assert m.requester.post.call_count >= len(m._loopback_probes)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -380,17 +341,19 @@ class TestSSRFSignalEvaluation:
         findings = module.run(ep)
         assert isinstance(findings, list)
 
-    def test_non_candidate_params_skipped(self) -> None:
+    def test_unchanged_response_produces_no_finding(self) -> None:
+        """No name-gating any more — a param is only quiet because nothing changed."""
         module = SSRFCheckModule(
             _mock_requester(), payloads_path=_SSRF_PROBES_PATH
         )
         module.requester.get.return_value = (
             _mock_response("<html>OK</html>", status=200), None
         )
-        # 'username' is not an SSRF candidate keyword.
         ep = _make_endpoint(query_params={"username": ["admin"]})
         findings = module.run(ep)
         assert findings == []
+        # It was still fuzzed (baseline + one request per probe) — just produced no signal.
+        assert module.requester.get.call_count >= 1 + len(module._loopback_probes)
 
     def test_finding_contains_all_required_fields(self) -> None:
         m = self._module()

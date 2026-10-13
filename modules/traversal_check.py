@@ -10,19 +10,25 @@ Detection Strategy
    patterns are compiled once at load time for performance.
 
 2. **Candidate parameter identification** — collect every URL query parameter
-   from the endpoint URL.  POST form GET-method fields are also considered.
+   from the endpoint URL, plus every GET-method form field (added to the
+   same GET candidate set). Every POST-method form's own fields are
+   candidates too, fuzzed via POST against that form's own baseline — this
+   is the module's own "GET-only" follow-up from the roadmap (§5 item 6);
+   it previously discarded every POST form's fields entirely.
 
-3. **Baseline fetch** — fetch the original endpoint URL once and record:
-   - Response body text
-   - HTTP status code
+3. **Baseline fetch** — one baseline per request shape: a single GET of the
+   endpoint URL covers every GET candidate, and each POST form gets its own
+   baseline POST (its own fields, unmodified) before any of *its* fields are
+   fuzzed. Each baseline records response body text and HTTP status code.
 
-   If the baseline body already matches any detection pattern, that endpoint
-   is skipped entirely (eliminates pre-existing false positives on error
-   pages that coincidentally contain UNIX-like text).
+   If a baseline body already matches any detection pattern, that baseline's
+   candidates are skipped entirely (eliminates pre-existing false positives
+   on error pages that coincidentally contain UNIX-like text).
 
 4. **Probe injection** — for each candidate parameter × each probe:
-   a. Substitute the parameter value with the probe sequence.
-   b. Issue a GET request with the modified URL.
+   a. Substitute the parameter/field value with the probe sequence.
+   b. Issue a GET (query parameter) or POST (form field) request with the
+      modified value — whichever request shape the candidate came from.
    c. Inspect the response body against all compiled detection patterns.
 
 5. **Confirmation** — a finding is emitted when:
@@ -53,12 +59,13 @@ import json
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from .base import BaseScannerModule, Confidence, Finding, Severity
 from core.crawler import CrawledEndpoint
 from core.cvss import build_vector, calculate as cvss_calc
+from core.parser import ParsedForm
 from core.requester import Requester
 
 logger = logging.getLogger(__name__)
@@ -214,7 +221,9 @@ class TraversalCheckModule(BaseScannerModule):
 
     def run(self, endpoint: CrawledEndpoint) -> List[Finding]:
         """
-        Run traversal probes against all URL query parameters on ``endpoint``.
+        Run traversal probes against ``endpoint``: every GET query/GET-form
+        parameter (fuzzed via GET), and every POST form's own fields
+        (fuzzed via POST against that form's own baseline).
 
         Parameters
         ----------
@@ -236,10 +245,24 @@ class TraversalCheckModule(BaseScannerModule):
             )
             return findings
 
-        # Collect candidate parameters from the endpoint URL query string.
-        params: Dict[str, List[str]] = dict(endpoint.query_params)
+        # Track confirmed (url, param) pairs to avoid duplicate findings.
+        confirmed: Set[Tuple[str, str]] = set()
 
-        # Also include GET-method form fields as URL parameter candidates.
+        findings.extend(self._run_get_candidates(endpoint, confirmed))
+        for form in endpoint.forms:
+            if (getattr(form, "method", "GET") or "GET").upper() == "POST":
+                findings.extend(self._run_post_form(form, confirmed))
+
+        return findings
+
+    # ── GET query/GET-form parameters ───────────────────────────────────────
+
+    def _run_get_candidates(
+        self, endpoint: CrawledEndpoint, confirmed: Set[Tuple[str, str]]
+    ) -> List[Finding]:
+        # Collect candidate parameters from the endpoint URL query string,
+        # plus every GET-method form's fields.
+        params: Dict[str, List[str]] = dict(endpoint.query_params)
         for form in endpoint.forms:
             if (getattr(form, "method", "GET") or "GET").upper() == "GET":
                 for field in form.fields:
@@ -250,23 +273,21 @@ class TraversalCheckModule(BaseScannerModule):
             logger.debug(
                 "traversal_check: No query params on %s — skipping.", endpoint.url
             )
-            return findings
+            return []
 
-        # ── Baseline fetch ────────────────────────────────────────────────────
         baseline_resp, baseline_err = self.requester.get(endpoint.url)
         if baseline_err or baseline_resp is None:
             logger.warning(
                 "traversal_check: Baseline fetch failed for %s: %s",
                 endpoint.url, baseline_err,
             )
-            return findings
-
+            return []
         if baseline_resp.status_code >= 500:
             logger.debug(
                 "traversal_check: Baseline %s returned HTTP %d — skipping.",
                 endpoint.url, baseline_resp.status_code,
             )
-            return findings
+            return []
 
         baseline_body: str = baseline_resp.text or ""
         baseline_match = self._matches_pattern(baseline_body)
@@ -276,74 +297,139 @@ class TraversalCheckModule(BaseScannerModule):
                 "skipping to avoid false positives.",
                 endpoint.url, baseline_match.id,
             )
-            return findings
+            return []
 
-        # Track confirmed (url, param) pairs to avoid duplicate findings.
-        confirmed: Set[Tuple[str, str]] = set()
-
+        findings: List[Finding] = []
         for param_name in list(params.keys()):
-            if (endpoint.url, param_name) in confirmed:
-                continue
-
-            for probe in self._probes:
-                probe_value: str = probe["value"]
-                fuzz_url = self._inject_param(endpoint.url, param_name, probe_value)
-
-                response, error = self.requester.get(fuzz_url)
-
-                if error or response is None:
-                    logger.debug(
-                        "traversal_check: Error probing %s param=%r: %s",
-                        fuzz_url, param_name, error,
-                    )
-                    continue
-
-                if response.status_code >= 500:
-                    continue  # Skip server errors — too noisy.
-
-                body = response.text or ""
-                matched_pattern = self._matches_pattern(body)
-
-                if matched_pattern is None:
-                    continue  # No pattern match — move to next probe.
-
-                # Confirmed: pattern matched in fuzzed response but not baseline.
-                confirmed.add((endpoint.url, param_name))
-                logger.info(
-                    "traversal_check: CONFIRMED LFI | %s | param=%r | "
-                    "probe=%r | pattern=%r",
-                    endpoint.url, param_name, probe_value, matched_pattern.id,
-                )
-
-                findings.append(
-                    Finding(
-                        title="Path Traversal / Local File Inclusion (LFI)",
-                        severity=Severity.HIGH,
-                        confidence=Confidence.CERTAIN,
-                        url=endpoint.url,
-                        parameter=param_name,
-                        payload=probe_value,
-                        evidence=(
-                            f"Probe {probe['id']!r} injected into parameter "
-                            f"{param_name!r} triggered detection pattern "
-                            f"{matched_pattern.id!r} ({matched_pattern.description}). "
-                            f"Fuzzed URL: {fuzz_url!r}"
-                        ),
-                        remediation=(
-                            "Never pass user-controlled input directly to file system "
-                            "APIs (open(), include(), require(), etc.). Validate and "
-                            "whitelist allowed file names/paths against a known-good "
-                            "list. Use realpath() / canonical path resolution and "
-                            "assert the resolved path starts with the expected base "
-                            "directory. Disable PHP allow_url_include and allow_url_fopen "
-                            "where not required. Consider serving files through a "
-                            "content-addressed API layer rather than passing paths "
-                            "directly to the file system."
-                        ),
-                        cvss_vector=_CVSS_VECTOR_HIGH,
-                        cvss_score=_CVSS_SCORE_HIGH,
-                    )
-                )
-                break  # One confirmed finding per param — move to next param.
-
+            finding = self._probe_param(
+                send=lambda v, p=param_name: self.requester.get(
+                    self._inject_param(endpoint.url, p, v)
+                ),
+                param_name=param_name,
+                report_url=endpoint.url,
+                confirmed=confirmed,
+                method="GET",
+            )
+            if finding:
+                findings.append(finding)
         return findings
+
+    # ── POST form fields ────────────────────────────────────────────────────
+
+    def _run_post_form(
+        self, form: ParsedForm, confirmed: Set[Tuple[str, str]]
+    ) -> List[Finding]:
+        base_body: Dict[str, str] = {
+            f.name: (f.default_value or "") for f in form.fields if f.name
+        }
+        if not base_body:
+            return []
+
+        baseline_resp, baseline_err = self.requester.post(form.action_url, data=base_body)
+        if baseline_err or baseline_resp is None:
+            logger.warning(
+                "traversal_check: POST baseline failed for %s: %s",
+                form.action_url, baseline_err,
+            )
+            return []
+        if baseline_resp.status_code >= 500:
+            return []
+
+        baseline_body: str = baseline_resp.text or ""
+        if self._matches_pattern(baseline_body):
+            logger.debug(
+                "traversal_check: POST baseline for %s already matches a "
+                "pattern — skipping to avoid false positives.",
+                form.action_url,
+            )
+            return []
+
+        findings: List[Finding] = []
+        for field_name in base_body:
+            finding = self._probe_param(
+                send=lambda v, f=field_name: self.requester.post(
+                    form.action_url, data={**base_body, f: v}
+                ),
+                param_name=field_name,
+                report_url=form.action_url,
+                confirmed=confirmed,
+                method="POST",
+            )
+            if finding:
+                findings.append(finding)
+        return findings
+
+    # ── Shared probe loop ────────────────────────────────────────────────────
+
+    def _probe_param(
+        self,
+        send: Any,
+        param_name: str,
+        report_url: str,
+        confirmed: Set[Tuple[str, str]],
+        method: str,
+    ) -> Optional[Finding]:
+        """Try each probe via ``send(probe_value)`` until one confirms traversal."""
+        if (report_url, param_name) in confirmed:
+            return None
+
+        for probe in self._probes:
+            probe_value: str = probe["value"]
+            response, error = send(probe_value)
+
+            if error or response is None:
+                logger.debug(
+                    "traversal_check: Error probing %s %s=%r: %s",
+                    report_url, param_name, probe_value, error,
+                )
+                continue
+            if response.status_code >= 500:
+                continue  # Skip server errors — too noisy.
+
+            body = response.text or ""
+            matched_pattern = self._matches_pattern(body)
+            if matched_pattern is None:
+                continue  # No pattern match — move to next probe.
+
+            # Confirmed: pattern matched in fuzzed response but not baseline.
+            confirmed.add((report_url, param_name))
+            logger.info(
+                "traversal_check: CONFIRMED LFI | %s | %s param=%r | "
+                "probe=%r | pattern=%r",
+                report_url, method, param_name, probe_value, matched_pattern.id,
+            )
+
+            return Finding(
+                title="Path Traversal / Local File Inclusion (LFI)",
+                severity=Severity.HIGH,
+                confidence=Confidence.CERTAIN,
+                url=report_url,
+                parameter=param_name,
+                payload=probe_value,
+                evidence=(
+                    f"Probe {probe['id']!r} injected into {method} parameter "
+                    f"{param_name!r} triggered detection pattern "
+                    f"{matched_pattern.id!r} ({matched_pattern.description})."
+                ),
+                remediation=(
+                    "Never pass user-controlled input directly to file system "
+                    "APIs (open(), include(), require(), etc.). Validate and "
+                    "whitelist allowed file names/paths against a known-good "
+                    "list. Use realpath() / canonical path resolution and "
+                    "assert the resolved path starts with the expected base "
+                    "directory. Disable PHP allow_url_include and allow_url_fopen "
+                    "where not required. Consider serving files through a "
+                    "content-addressed API layer rather than passing paths "
+                    "directly to the file system."
+                ),
+                cvss_vector=_CVSS_VECTOR_HIGH,
+                cvss_score=_CVSS_SCORE_HIGH,
+                extra={
+                    "probe_id": probe["id"],
+                    "pattern_id": matched_pattern.id,
+                    "method": method,
+                    "module": self.name,
+                },
+            )
+
+        return None
