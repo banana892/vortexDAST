@@ -201,8 +201,7 @@ own quality:
   unauthenticated (doesn't carry the scan's cookie jar into the browser
   context yet — that's the authenticated-scanning follow-up below, not
   done here).
-- **API testing** — 🚧 *discovery + fuzzing shipped; spec import still
-  open.* Until now nothing in the crawl/parse pipeline carried a JSON body, a content-type,
+- **API testing** — ✅ *all three sub-items shipped.* Until now nothing in the crawl/parse pipeline carried a JSON body, a content-type,
   or a REST path-param concept: `CrawledEndpoint` (`core/crawler.py`) had
   only `forms`/`links`/`query_params`, and `ParsedForm` (`core/parser.py`)
   is HTML-input-shaped. The one piece of prior art, `nosql_check.py`'s
@@ -265,14 +264,41 @@ own quality:
      `tests/test_json_fuzz.py` covers the primitives directly; each
      module's own test file covers the wiring (nested-leaf error/operator
      detection, path-segment fuzzing, boolean-/time-based blind on a leaf).
-  3. **Spec import (OpenAPI/Swagger/Postman) — explicitly deferred**, a
-     separate follow-up phase: a different input source (a file, not a
-     crawl) that would feed the *same* `json_requests` discovery list, so
-     it doesn't change the fuzzing engine above, only adds another producer
-     for it.
-  - **Non-goals for v1:** schema-aware fuzzing (type coercion, enum
-    violations) — v1 only substitutes existing injection probes into JSON
-    leaves/path segments, it doesn't reason about a schema it doesn't have.
+  3. ✅ *shipped:* **Spec import (OpenAPI 3.x, Swagger 2.0, Postman
+     Collection v2.1)** — the different-input-source producer this was
+     scoped to be: `core/spec_import.py`'s `import_openapi_spec`/
+     `import_postman_collection` parse a *local* spec file (`--openapi
+     PATH` / `--postman PATH`, JSON or YAML for OpenAPI/Swagger) into the
+     exact same synthetic `CrawledEndpoint`/`CapturedJsonRequest` output
+     Phase 1's live capture produces, merged into the scan the same
+     dedupe-by-URL way as the dynamic crawl — **zero changes to Phase 2's
+     fuzzing engine** to consume them, confirming the original scoping
+     call. Every path is rebased onto the scan's actual `--target`,
+     ignoring the spec's own `servers`/`host` (same "stay on the live
+     target" rule nmap/subfinder chaining already follows). A path
+     template placeholder (OpenAPI `{id}`, Postman `:id`/`{{id}}`) becomes
+     a numeric placeholder, which `core/json_fuzz.py`'s existing
+     `looks_like_object_reference` already recognises as fuzzable — no
+     changes needed there either. OpenAPI/Swagger request bodies are
+     *synthesized* from JSON Schema (the spec's own `example`/`default`/
+     `enum` when present, else a type-appropriate placeholder, resolving
+     local `$ref`s with a depth cap against self-reference) since a spec
+     only has schemas, not literal values; Postman's `request.body.raw` is
+     almost always a saved literal example already, so it's just
+     `json.loads()`. GET-style operations become plain `query_params`
+     endpoints, reusing the GET fuzzers that already exist — only
+     POST/PUT/PATCH-with-a-body becomes a `CapturedJsonRequest`. Local
+     file input only in v1 — no URL-fetch option, no auto-discovery of
+     well-known spec paths (`/openapi.json`, …); a missing/malformed file
+     degrades to an empty import with a logged error, never failing the
+     scan. `tests/test_spec_import.py` covers both formats, nested
+     Postman folders, `$ref` resolution (including the self-referential
+     case), and every degrade path.
+  - **Non-goals:** schema-aware fuzzing (type coercion, enum violations) —
+    fuzzing still only substitutes existing injection probes into JSON
+    leaves/path segments, it doesn't reason about a schema. `oneOf`/
+    `allOf`/`anyOf` schema composition isn't resolved during synthesis —
+    upgrade if a real spec needs it.
 - **Authenticated scanning — follow-ups** on the shipped scaffold (§5.1):
   - ✅ *shipped:* **login-page CSRF-token harvesting** — `core/auth.py`
     GETs the login (and MFA) page first and merges any hidden form fields
@@ -546,3 +572,16 @@ Ordered by impact; several are now *resolved by the plan above*.
   gain there; the leaf-walker's value is for the genuinely-nested bodies
   Phase 1 captures from real page JS. Only OpenAPI/Swagger/Postman spec
   import remains open for Phase D's "API testing" item.
+- 2026-10-13 — Phase D API testing complete: `core/spec_import.py` adds
+  `--openapi PATH` (OpenAPI 3.x/Swagger 2.0, JSON or YAML) and `--postman
+  PATH` (Postman Collection v2.1) import, producing the same
+  `CrawledEndpoint`/`CapturedJsonRequest` shape Phase 1's live capture
+  does — merged the same dedupe-by-URL way, no changes to Phase 2's
+  fuzzing engine needed. Request bodies are synthesized from JSON Schema
+  (`example`/`default`/`enum`, else type-appropriate placeholders, local
+  `$ref` resolution with a depth cap); Postman bodies are parsed literally.
+  Path templates (`{id}`, `:id`, `{{id}}`) become numeric placeholders,
+  already fuzzable via the existing path-segment detection. Local file
+  input only — no URL fetch, no well-known-path auto-discovery. All three
+  "API testing" sub-items (discovery, fuzzing, spec import) are now
+  shipped.

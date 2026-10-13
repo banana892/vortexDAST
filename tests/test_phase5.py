@@ -697,6 +697,23 @@ class TestCLIParser:
         args = self._parse(["-u", "https://target.com", "--dynamic"])
         assert args.dynamic is True
 
+    def test_no_json_fuzz_flag(self) -> None:
+        args = self._parse(["-u", "https://target.com", "--no-json-fuzz"])
+        assert args.no_json_fuzz is True
+
+    def test_openapi_flag(self) -> None:
+        args = self._parse(["-u", "https://target.com", "--openapi", "spec.yaml"])
+        assert args.openapi == "spec.yaml"
+
+    def test_postman_flag(self) -> None:
+        args = self._parse(["-u", "https://target.com", "--postman", "collection.json"])
+        assert args.postman == "collection.json"
+
+    def test_openapi_and_postman_default_to_none(self) -> None:
+        args = self._parse(["-u", "https://target.com"])
+        assert args.openapi is None
+        assert args.postman is None
+
     def test_output_flag(self) -> None:
         args = self._parse(["-u", "https://target.com", "-o", "report.json"])
         assert args.output == "report.json"

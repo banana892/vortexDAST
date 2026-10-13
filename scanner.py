@@ -81,6 +81,7 @@ from core import crawl_cache
 from core.auth import FormLoginAuthenticator, parse_login_data
 from core.crawler import CrawlResult, CrawledEndpoint, Crawler, ScopeGuard
 from core.dom_watcher import DomWatcher
+from core.spec_import import import_openapi_spec, import_postman_collection
 from core.endpoint_group import group_endpoints
 from core.profiles import (
     PROFILE_NAMES,
@@ -785,6 +786,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "added as endpoints for the scanner modules to fuzz. Has no "
             "effect without --dynamic — only the dynamic crawl can observe "
             "a page's own JS making these calls."
+        ),
+    )
+    parser.add_argument(
+        "--openapi",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Import endpoints from a local OpenAPI 3.x or Swagger 2.0 spec "
+            "file (JSON or YAML). Paths are rebased onto the scan target; "
+            "each operation's JSON body/query params are fuzzed the same "
+            "way a captured --dynamic JSON request is."
+        ),
+    )
+    parser.add_argument(
+        "--postman",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Import endpoints from a local Postman Collection v2.1 JSON "
+            "export. Paths are rebased onto the scan target; each "
+            "request's JSON body/query params are fuzzed the same way a "
+            "captured --dynamic JSON request is."
         ),
     )
     parser.add_argument(
@@ -1656,6 +1679,31 @@ def run_scan(args: argparse.Namespace) -> int:
 
         if not crawl_result.endpoints:
             logger.warning("No endpoints were crawled. Check target URL and network connectivity.")
+
+        # ── Spec import (optional) ─────────────────────────────────────────
+        # Offline/local — no network dependency on the crawl above. Each
+        # operation becomes a synthetic endpoint via core/spec_import.py,
+        # merged in the same dedupe-by-URL way as the dynamic crawl below,
+        # so the fuzzing modules need no changes to pick them up.
+        if args.openapi or args.postman:
+            spec_endpoints: List[CrawledEndpoint] = []
+            if args.openapi:
+                spec_endpoints.extend(import_openapi_spec(args.openapi, args.target))
+            if args.postman:
+                spec_endpoints.extend(import_postman_collection(args.postman, args.target))
+
+            existing_urls = crawl_result.all_urls
+            new_spec_endpoints = [
+                ep for ep in spec_endpoints if ep.url not in existing_urls
+            ]
+            crawl_result.endpoints.extend(new_spec_endpoints)
+
+            ui.status(
+                console, theme,
+                "ok" if new_spec_endpoints else "info",
+                f"Spec import complete — {len(new_spec_endpoints)} new endpoint(s)",
+                f"({len(spec_endpoints) - len(new_spec_endpoints)} duplicate)",
+            )
 
         # ── Phase 2: Dynamic crawl (optional) ─────────────────────────────
         # Additive: re-crawls the same seed with JS rendered and merges in

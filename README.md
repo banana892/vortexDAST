@@ -34,7 +34,7 @@ between what runs today and what is planned — see
 | **Out-of-band (OAST)** testing for blind SSRF, RCE and SQLi (via interactsh) | ✅ Shipped (opt-in) |
 | **JavaScript / SPA rendering** (`--dynamic`, headless Chromium) | ✅ Shipped (opt-in) |
 | **JSON API fuzzing** — captures `fetch`/XHR calls during `--dynamic` crawling and fuzzes their (nested) bodies + REST path segments | ✅ Shipped (opt-in, via `--dynamic`) |
-| **OpenAPI/Swagger/Postman spec import** | 🚧 Planned |
+| **OpenAPI/Swagger/Postman spec import** (`--openapi`, `--postman`) | ✅ Shipped (opt-in) |
 
 ---
 
@@ -97,6 +97,15 @@ plain HTTP GET):
 
 ```bash
 vortex -u https://app.local --dynamic
+```
+
+API testing (opt-in; import endpoints from a spec instead of/alongside
+crawling — every path is rebased onto `-u`'s target, request bodies are
+fuzzed the same way a captured `--dynamic` JSON request is):
+
+```bash
+vortex -u https://app.local --openapi openapi.yaml
+vortex -u https://app.local --postman collection.json
 ```
 
 Network recon (opt-in; scans the target host, or an explicit range):
