@@ -687,9 +687,23 @@ Ordered by impact; several are now *resolved by the plan above*.
   `_MAX_RETRY_AFTER_WAIT` (30s) so one header can't stall a whole scan.
   Everything stays inside the existing non-blocking slot-reservation model —
   no new sleep call, just a larger `_min_interval` the next dispatch already
-  honours. **Known limit:** header-fingerprint matching only; a WAF that
-  returns a bare 403 with none of these headers (or masks them) still isn't
-  detected.
+  honours.
+  **Headerless edge blocks — ✅ fixed.** A 403 carrying none of the
+  fingerprint headers above now falls back to a body-signature check: six
+  distinctive block-page phrases from real WAF products (Cloudflare's
+  "Attention Required!" challenge page, Sucuri's firewall page, Imperva/
+  Incapsula's "incident ID" page, F5 BIG-IP ASM's classic rejection message,
+  and ModSecurity's own two common phrasings) scanned against the first 4KB
+  of the body (`_WAF_BODY_SNIFF_LIMIT`) — bounding the cost against an
+  unrelated multi-megabyte 403 page. `_record_status` takes the body as a
+  new optional third argument (default `""`, so every existing direct-call
+  unit test keeps working unchanged); the three real dispatch call sites
+  supply it via `_body_for_waf_check`, which only reads `response.text` at
+  all on an actual 403 and never raises on a decode failure. **Known
+  limit:** still signature-based, now for bodies instead of only headers —
+  a WAF whose block page matches neither a listed header nor a listed body
+  phrase remains undetected; the signature list can grow as real targets
+  surface one that's missing.
 
 ---
 
@@ -1008,3 +1022,19 @@ Ordered by impact; several are now *resolved by the plan above*.
   composition keywords (including the "`allOf` + own properties at once"
   shape). Only known limit left: no auto-discovery of a spec at a
   well-known path when neither flag is given.
+- 2026-10-15 — Edge-WAF-aware backoff extended with a body-signature
+  fallback, closing its "header-fingerprint matching only" limit: a 403
+  with none of the recognised fingerprint headers now also gets checked
+  against six known WAF/CDN block-page phrases (Cloudflare, Sucuri,
+  Imperva/Incapsula, F5 BIG-IP ASM, ModSecurity ×2) in the first 4KB of the
+  body. `_record_status` gained an optional `body` argument (default `""`,
+  every existing direct-call unit test unaffected); the three real dispatch
+  call sites supply it via a new `_body_for_waf_check` helper, which only
+  touches `response.text` on an actual 403 and never raises. Verified with
+  new unit tests (signature match, case-insensitivity, no false positive on
+  an unrelated 403 body, the sniff-limit bound actually bounding the scan,
+  a 200 never triggering the body check at all) and a real local-server
+  end-to-end test (a bare 403 with zero WAF headers, only a ModSecurity
+  body phrase, correctly detected through the full `.get()` path). Known
+  limit remains signature-based — a block page matching neither a header
+  nor a listed body phrase still isn't detected.

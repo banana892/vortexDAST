@@ -377,16 +377,45 @@ class Requester:
     #: just higher since this one is the server explicitly telling us a number.
     _MAX_RETRY_AFTER_WAIT = 30.0
 
+    #: Body-text substrings (checked case-insensitively, lowercased) that
+    #: belong to a WAF/CDN edge's own block/challenge page — the fallback
+    #: fingerprint for an edge that strips or omits every header above.
+    #: Each is distinctive enough to a specific real WAF product that an
+    #: ordinary application 403 page wouldn't plausibly contain it.
+    _WAF_EDGE_BODY_SIGNATURES = (
+        "attention required! | cloudflare",
+        "sucuri website firewall",
+        "incapsula incident id",
+        "the requested url was rejected. please consult with your administrator",
+        "mod_security",
+        "modsecurity",
+    )
+    #: How much of a 403 body to scan for a signature — block pages are
+    #: always small; this just bounds the cost against an unrelated
+    #: multi-megabyte 403 response.
+    _WAF_BODY_SNIFF_LIMIT = 4096
+
     @classmethod
-    def _is_waf_edge_block(cls, status: int, headers: Any) -> bool:
-        """Best-effort fingerprint: a 403 with a recognised CDN/WAF header."""
-        if status != 403 or not headers:
+    def _is_waf_edge_block(cls, status: int, headers: Any, body: str = "") -> bool:
+        """
+        Best-effort fingerprint: a 403 carrying a recognised CDN/WAF header,
+        or — when none of those are present — whose body matches a known
+        WAF/CDN block-page signature.
+        """
+        if status != 403:
             return False
-        names = {str(k).lower() for k in headers}
-        if names & cls._WAF_EDGE_HEADER_NAMES:
-            return True
-        server = str(headers.get("Server") or "").lower()
-        return "cloudflare" in server or "sucuri" in server
+        if headers:
+            names = {str(k).lower() for k in headers}
+            if names & cls._WAF_EDGE_HEADER_NAMES:
+                return True
+            server = str(headers.get("Server") or "").lower()
+            if "cloudflare" in server or "sucuri" in server:
+                return True
+        if body:
+            sniffed = body[: cls._WAF_BODY_SNIFF_LIMIT].lower()
+            if any(sig in sniffed for sig in cls._WAF_EDGE_BODY_SIGNATURES):
+                return True
+        return False
 
     @classmethod
     def _parse_retry_after(cls, value: Any) -> Optional[float]:
@@ -415,12 +444,31 @@ class Requester:
             return None
         return min(seconds, cls._MAX_RETRY_AFTER_WAIT)
 
-    def _record_status(self, status: int, headers: Any) -> None:
-        """Slow the global rate limiter when the target throttles; recover gradually."""
+    @staticmethod
+    def _body_for_waf_check(response: "requests.Response") -> str:
+        """
+        ``response.text`` when (and only when) this is a 403 worth
+        fingerprinting — never raises, since a decode failure on an
+        unrelated response must not break a scan.
+        """
+        if response.status_code != 403:
+            return ""
+        try:
+            return response.text
+        except Exception:  # noqa: BLE001 — see docstring
+            return ""
+
+    def _record_status(self, status: int, headers: Any, body: str = "") -> None:
+        """
+        Slow the global rate limiter when the target throttles; recover
+        gradually. ``body`` (only needed on a 403 — see
+        :meth:`_is_waf_edge_block`) is optional so this stays callable with
+        just status/headers, as every direct unit test already does.
+        """
         # urllib3 has already retried 429/503 by this point, so a final one means
         # the target is still pushing back.
         headers = headers or {}
-        waf_block = self._is_waf_edge_block(status, headers)
+        waf_block = self._is_waf_edge_block(status, headers, body)
         throttled = status == 429 or (status == 503 and "Retry-After" in headers) or waf_block
         retry_after = self._parse_retry_after(headers.get("Retry-After")) if throttled else None
         message = None
@@ -526,7 +574,9 @@ class Requester:
             # Count this redirect hop against throttle/status tracking before
             # we send the next one; the final (non-redirect) response is
             # recorded by the caller in :meth:`_dispatch`.
-            self._record_status(response.status_code, response.headers)
+            self._record_status(
+                response.status_code, response.headers, self._body_for_waf_check(response)
+            )
             response = self.session.send(
                 nxt,
                 allow_redirects=False,
@@ -601,7 +651,9 @@ class Requester:
         # Replay the original request once with the refreshed session.
         try:
             replay = self.session.request(method, url, **kwargs)
-            self._record_status(replay.status_code, replay.headers)
+            self._record_status(
+                replay.status_code, replay.headers, self._body_for_waf_check(replay)
+            )
             return replay
         except requests.exceptions.RequestException as exc:
             logger.debug("replay after re-auth failed: %s", exc)
@@ -639,7 +691,9 @@ class Requester:
                 "%s %s → HTTP %d (%d bytes)",
                 method, url, response.status_code, len(response.content),
             )
-            self._record_status(response.status_code, response.headers)
+            self._record_status(
+                response.status_code, response.headers, self._body_for_waf_check(response)
+            )
             response = self._maybe_recover_session(method, url, response, kwargs)
             return response, None
 
