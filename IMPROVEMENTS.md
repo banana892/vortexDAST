@@ -374,12 +374,28 @@ own quality:
     grant otherwise. New CLI flags: `--oauth2-token-url`,
     `--oauth2-grant-type`, `--oauth2-client-id`, `--oauth2-client-secret`,
     `--oauth2-username`, `--oauth2-password`, `--oauth2-scope` — mutually
-    exclusive with `--login-url`. **Known limit:** the interactive
-    `authorization_code` (+ PKCE) grant needs a real browser to complete a
-    login-page redirect — a different shape of work (driving
-    `core/dom_watcher.py`'s headless browser through that redirect) — and is
-    not implemented; OAuth2 also has no role-matrix (`--role2-*`)
-    equivalent yet, which remains form-login-only.
+    exclusive with `--login-url`.
+  - ✅ *shipped:* **`authorization_code` + PKCE** (RFC 7636) — the
+    interactive grant, which drives a real headless Chromium (Playwright,
+    same engine as `DomWatcher`) through the authorization server's own
+    login page: navigates to `--oauth2-authorize-url` with a generated PKCE
+    challenge, fills `--oauth2-login-data` into the rendered login form's
+    inputs by `name` and submits, then reads the authorization code out of
+    the server's HTTP redirect `Location` header back to
+    `--oauth2-redirect-uri` — via a `page.on("response")` listener, not by
+    letting the browser actually navigate there, since Chromium/Playwright
+    don't reliably re-route a redirect chained off an already-continued
+    request — and exchanges it plus the PKCE verifier for a token.
+    `--oauth2-redirect-uri` never needs to resolve to anything real. Shares
+    `OAuth2Authenticator`'s `login`/`is_session_valid`/`reauthenticate`
+    shape; `reauthenticate` redoes the full browser flow when there's no
+    refresh token (a stray subsequent navigation to `redirect_uri`, if the
+    browser gets that far, is harmless — the code is already captured by
+    then). **Known limit:** only a single login-form submission is driven —
+    a login page needing its own MFA step isn't handled — and only an HTTP
+    3xx `Location` redirect is recognised, not a client-side (JS/meta-
+    refresh) one. OAuth2 still has no role-matrix (`--role2-*`) equivalent
+    for any grant.
 
 ### Phase E — Tier-3 adapters + chaining polish
 - ~~ffuf~~ ✅ shipped early (curated-catalogue default wordlist, `-ac`
@@ -451,15 +467,17 @@ own quality:
 From assessing a real modern target (SPA + auth + API, on managed hosting).
 Ordered by impact; several are now *resolved by the plan above*.
 
-1. **Authenticated scanning** — ✅ *all follow-ups shipped.*
+1. **Authenticated scanning** — ✅ *all follow-ups shipped, including the
+   browser-driven grant.*
    `core/auth.py` (`FormLoginAuthenticator`) + `Requester.set_session_recovery`
    give form login, CSRF-token harvesting, multi-step/MFA (incl. live TOTP),
    and transparent mid-scan re-auth (replaying every configured step with a
    fresh code). `--role2-login-data` adds a role-matrix second identity, and
    `core/auth.py` (`OAuth2Authenticator`) adds OAuth2/OIDC bearer-token auth
-   (`password`/`client_credentials` grants + refresh) — see Phase D. Only
-   the interactive `authorization_code` grant (needs a browser redirect)
-   remains open.
+   — `password`/`client_credentials` (single HTTP call) and now
+   `authorization_code` + PKCE (headless-Chromium-driven) — all three with
+   refresh. See Phase D for detail; nothing is open here anymore beyond
+   OAuth2's missing role-matrix equivalent, tracked there as a known limit.
 2. **No JS/SPA rendering** — ✅ *resolved by Phase D* (`DomWatcher`,
    `--dynamic`). A thin static-only result is still possible if `--dynamic`
    is left off, but it's no longer the only option.
@@ -613,8 +631,9 @@ Ordered by impact; several are now *resolved by the plan above*.
   live RFC 6238 TOTP), + mid-scan session recovery that replays every step,
   + a role-matrix second identity (`--role2-login-data`) that
   `access_control_check` diffs against the primary session.
-- OAuth2/OIDC bearer-token authentication (`password`/`client_credentials`
-  grants + refresh-token recovery), as an alternative to form login.
+- OAuth2/OIDC bearer-token authentication (`password`/`client_credentials`/
+  `authorization_code`+PKCE grants + refresh-token recovery), as an
+  alternative to form login.
 - Tool orchestration (Phases A + B + C + E, complete): `ToolAdapter`
   framework, `--tools` / `--no-tools` / `--tool-timeout` / `--list-tools`, 9
   adapters (nuclei, nmap, httpx, ffuf, sqlmap, interactsh, nikto,
@@ -819,3 +838,22 @@ Ordered by impact; several are now *resolved by the plan above*.
   SSRF-indicative keyword list. Verified end-to-end against a local server:
   a POST form's `file` field now reports LFI, and a GET parameter named `q`
   (matching no keyword) now reports SSRF.
+- 2026-10-15 — OAuth2 `authorization_code` + PKCE grant shipped, closing the
+  last open item under "Authenticated scanning": `OAuth2Authenticator` now
+  drives a real headless Chromium through the authorization server's login
+  page (generates the PKCE challenge, fills `--oauth2-login-data` into the
+  rendered form by input `name`, submits) and reads the authorization code
+  out of the redirect `Location` header back to `--oauth2-redirect-uri` —
+  via a response listener, since Chromium/Playwright don't reliably
+  re-route a redirect chained off an already-continued request, so
+  `page.route()` interception (the original approach) silently never saw
+  it. `--oauth2-redirect-uri` never needs to resolve to anything real.
+  New CLI flags: `--oauth2-authorize-url`, `--oauth2-redirect-uri`,
+  `--oauth2-login-data`; `--oauth2-grant-type` gained the `authorization_code`
+  choice. Verified against a real headless Chromium run and a local
+  from-scratch OAuth2/PKCE IdP (`tests/test_auth.py`): full login→code→token
+  flow, wrong credentials rejected, a redeemed code can't be replayed, and
+  `reauthenticate` without a refresh token redoes the full browser login.
+  Known limits: only a single login-form submission is driven (no MFA step
+  on the IdP's own login page) and only an HTTP 3xx redirect is recognised,
+  not a client-side one; OAuth2 still has no role-matrix equivalent.

@@ -35,24 +35,30 @@ This module adds the two missing pieces:
 * :class:`OAuth2Authenticator` — a second, independent strategy for targets
   protected by OAuth2/OIDC instead of a session cookie: exchanges credentials
   for a bearer access token at the authorization server's token endpoint and
-  attaches it to every request. Implements the two grants that complete in a
-  single unattended HTTP call — ``password`` (Resource Owner Password
-  Credentials, a test account's own username/password) and
+  attaches it to every request. Implements ``password`` (Resource Owner
+  Password Credentials, a test account's own username/password) and
   ``client_credentials`` (a service-level client id/secret, no end-user
-  account) — plus token refresh. Same ``login``/``is_session_valid``/
-  ``reauthenticate`` shape as :class:`FormLoginAuthenticator`, so it plugs
-  into :meth:`Requester.set_session_recovery` the same way.
+  account) in a single unattended HTTP call, plus ``authorization_code`` +
+  PKCE (RFC 7636) — the interactive grant, which drives a real headless
+  Chromium (via Playwright, same engine as `core/dom_watcher.py`) through the
+  authorization server's own login page, intercepts the browser's navigation
+  back to the registered ``redirect_uri`` to pull the code out of the URL
+  without ever needing that URI to resolve to anything real, and exchanges it
+  for a token with the PKCE verifier. All three grants support token refresh.
+  Same ``login``/``is_session_valid``/``reauthenticate`` shape as
+  :class:`FormLoginAuthenticator`, so it plugs into
+  :meth:`Requester.set_session_recovery` the same way.
 
 Scope of this scaffold
 -----------------------
 Form-based login (GET or POST), CSRF-token harvesting, two-step/MFA logins,
-and OAuth2/OIDC's password and client_credentials grants are implemented and
-tested. The interactive ``authorization_code`` (+ PKCE) grant needs a real
-browser to complete a login-page redirect — a different shape of work
-(driving `core/dom_watcher.py`'s headless browser through that redirect) —
-and is left as a follow-up. A multi-identity "role matrix" comparison for
-form logins is implemented in `modules/access_control_check.py`
-(`--role2-login-data`); OAuth2 has no role-matrix equivalent yet.
+and all three OAuth2/OIDC grants (``password``, ``client_credentials``,
+``authorization_code`` + PKCE) are implemented and tested. A multi-identity
+"role matrix" comparison for form logins is implemented in
+`modules/access_control_check.py` (`--role2-login-data`); OAuth2 has no
+role-matrix equivalent yet. The ``authorization_code`` grant only drives a
+single login-form submission — a login page requiring its own MFA step is
+not handled.
 """
 
 from __future__ import annotations
@@ -62,10 +68,11 @@ import hashlib
 import hmac
 import logging
 import re
+import secrets
 import struct
 import time
-from typing import TYPE_CHECKING, Dict, Optional
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 from .parser import HTMLParser
 
@@ -351,18 +358,27 @@ class OAuth2Authenticator:
     """
     Authenticate a scan session against an OAuth2/OIDC-protected target by
     obtaining a bearer access token from the authorization server's token
-    endpoint (RFC 6749 §4.3/§4.4) and attaching it to every request.
+    endpoint (RFC 6749 §4.3/§4.4/§4.1) and attaching it to every request.
 
-    Supports the two grants that complete in a single unattended HTTP call —
-    the only kind a CLI scan can drive without a real browser:
+    Supports three grants:
 
     * ``"password"`` — Resource Owner Password Credentials: a test account's
       own ``username``/``password`` exchanged directly for a token.
     * ``"client_credentials"`` — a service-level ``client_id``/
       ``client_secret`` pair, no end-user account at all.
+    * ``"authorization_code"`` (+ PKCE, RFC 7636) — the interactive grant.
+      Since a CLI scan has no human to click through the authorization
+      server's login page, this drives a real headless Chromium (Playwright)
+      through it instead: navigate to the ``authorize_url`` with a generated
+      PKCE challenge, fill ``login_credentials`` into the rendered login
+      form's inputs (matched by ``name`` attribute) and submit, then capture
+      the browser's navigation back to ``redirect_uri`` — intercepted before
+      it actually fires, so ``redirect_uri`` never needs to resolve to a real
+      endpoint and the one-time code is never consumed by anything but this
+      authenticator — and exchange the code plus the PKCE verifier for a
+      token at ``token_url``.
 
-    The interactive ``authorization_code`` (+ PKCE) grant needs a browser to
-    complete a login-page redirect and is not implemented here.
+    All three support token refresh via a returned ``refresh_token``.
 
     Parameters
     ----------
@@ -371,7 +387,7 @@ class OAuth2Authenticator:
         this as ``token_endpoint`` in their ``.well-known/openid-configuration``
         document; pass the resolved URL directly — no discovery is done here).
     grant_type:
-        ``"password"`` or ``"client_credentials"``.
+        ``"password"``, ``"client_credentials"`` or ``"authorization_code"``.
     client_id:
         OAuth2 client identifier.
     client_secret:
@@ -381,6 +397,19 @@ class OAuth2Authenticator:
         Required for the ``"password"`` grant; ignored otherwise.
     scope:
         Optional space-separated scope string (e.g. ``"openid profile"``).
+    authorize_url:
+        The authorization server's authorization endpoint. Required for
+        ``"authorization_code"``.
+    redirect_uri:
+        The registered redirect URI. Required for ``"authorization_code"``;
+        never actually reached (see above).
+    login_credentials:
+        Field-name → value map filled into the rendered login page's inputs
+        (by ``name`` attribute) before it's submitted. Required for
+        ``"authorization_code"``.
+    nav_timeout_ms:
+        Per-step navigation/fill/submit timeout for the browser-driven
+        ``"authorization_code"`` flow.
     """
 
     def __init__(
@@ -393,14 +422,25 @@ class OAuth2Authenticator:
         username: Optional[str] = None,
         password: Optional[str] = None,
         scope: Optional[str] = None,
+        authorize_url: Optional[str] = None,
+        redirect_uri: Optional[str] = None,
+        login_credentials: Optional[Dict[str, str]] = None,
+        nav_timeout_ms: int = 20_000,
     ) -> None:
-        if grant_type not in ("password", "client_credentials"):
+        if grant_type not in ("password", "client_credentials", "authorization_code"):
             raise ValueError(
-                f"unsupported OAuth2 grant_type {grant_type!r}; "
-                "use 'password' or 'client_credentials'"
+                f"unsupported OAuth2 grant_type {grant_type!r}; use 'password', "
+                "'client_credentials' or 'authorization_code'"
             )
         if grant_type == "password" and not (username and password):
             raise ValueError("the 'password' grant requires both username and password")
+        if grant_type == "authorization_code" and not (
+            authorize_url and redirect_uri and login_credentials
+        ):
+            raise ValueError(
+                "the 'authorization_code' grant requires authorize_url, "
+                "redirect_uri and login_credentials"
+            )
         self.token_url = token_url
         self.grant_type = grant_type
         self.client_id = client_id
@@ -408,11 +448,17 @@ class OAuth2Authenticator:
         self.username = username
         self.password = password
         self.scope = scope
+        self.authorize_url = authorize_url
+        self.redirect_uri = redirect_uri
+        self.login_credentials = login_credentials or {}
+        self.nav_timeout_ms = nav_timeout_ms
         self._expires_at: Optional[float] = None
         self._refresh_token: Optional[str] = None
 
     def login(self, requester: "Requester") -> bool:
         """Obtain an initial access token and attach it to ``requester``'s session."""
+        if self.grant_type == "authorization_code":
+            return self._browser_authorize(requester)
         return self._request_token(requester, refresh=False)
 
     def is_session_valid(self, resp: "requests.Response") -> bool:
@@ -431,7 +477,10 @@ class OAuth2Authenticator:
         logger.warning("auth: OAuth2 token expired/rejected — refreshing")
         if self._refresh_token and self._request_token(requester, refresh=True):
             return True
-        return self._request_token(requester, refresh=False)
+        # No refresh token (or the refresh was itself rejected): redo the
+        # original grant from scratch — for authorization_code this means a
+        # fresh browser-driven login, which plain _request_token can't do.
+        return self.login(requester)
 
     def _request_token(self, requester: "Requester", *, refresh: bool) -> bool:
         data: Dict[str, str] = {"client_id": self.client_id}
@@ -448,7 +497,11 @@ class OAuth2Authenticator:
             data["grant_type"] = "client_credentials"
         if self.scope:
             data["scope"] = self.scope
+        return self._submit_token_request(requester, data, refreshed=refresh)
 
+    def _submit_token_request(
+        self, requester: "Requester", data: Dict[str, str], *, refreshed: bool
+    ) -> bool:
         resp, err = requester.post(self.token_url, data=data)
         if err or resp is None or resp.status_code >= 400:
             logger.error(
@@ -473,9 +526,161 @@ class OAuth2Authenticator:
         self._refresh_token = payload.get("refresh_token", self._refresh_token)
         logger.info(
             "auth: OAuth2 token acquired (%s grant%s)",
-            self.grant_type, ", refreshed" if refresh else "",
+            data.get("grant_type"), ", refreshed" if refreshed else "",
         )
         return True
+
+    # ── authorization_code + PKCE (interactive, browser-driven) ────────────
+
+    def _browser_authorize(self, requester: "Requester") -> bool:
+        """
+        Drive a headless Chromium through the authorization server's login
+        page to obtain an authorization code, then exchange it for a token.
+
+        The code is pulled out of the ``Location`` header of the server's own
+        HTTP redirect to ``redirect_uri`` (a ``page.on("response")``
+        listener, checked against every response as it arrives) rather than
+        by letting the browser actually navigate there and inspecting the
+        resulting URL — Chromium/Playwright don't re-run a page-level
+        ``route()`` handler for a redirect hop chained off a request that was
+        itself allowed through, so blocking the navigation that way isn't
+        reliable. Reading the header means ``redirect_uri`` never needs to
+        resolve to anything real, and a stray subsequent navigation attempt
+        (which may well fail to load) is harmless — the code is already
+        captured by the time it's dispatched.
+
+        Never raises: a missing Playwright install, a browser that fails to
+        launch, a login the IdP rejects, or a navigation that never reaches
+        ``redirect_uri`` all degrade to a logged error and ``False`` — the
+        same "must not crash the scan" contract as ``DomWatcher.crawl``.
+
+        shortcut: only an HTTP 3xx ``Location`` redirect to ``redirect_uri``
+        is recognised — an IdP that hands back the code via a client-side
+        (JS/meta-refresh) redirect instead isn't handled.
+        """
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            logger.error(
+                "auth: the 'authorization_code' grant needs Playwright "
+                "(pip install playwright && playwright install chromium)"
+            )
+            return False
+
+        verifier, challenge = _pkce_pair()
+        state = secrets.token_urlsafe(16)
+        query = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+        if self.scope:
+            query["scope"] = self.scope
+        authorize_url = f"{self.authorize_url}?{urlencode(query)}"
+
+        callback: Dict[str, str] = {}
+
+        def _on_response(response: Any) -> None:
+            if "code" in callback:
+                return
+            try:
+                if not (300 <= response.status < 400):
+                    return
+                location = response.headers.get("location")
+                if not location:
+                    return
+                target = urljoin(response.url, location)
+                if not target.startswith(self.redirect_uri or "\0"):
+                    return
+                qs = parse_qs(urlsplit(target).query)
+                if qs.get("code"):
+                    callback["code"] = qs["code"][0]
+                callback["state"] = (qs.get("state") or [""])[0]
+            except Exception:  # noqa: BLE001 — a malformed response must not crash the flow
+                return
+
+        try:
+            with sync_playwright() as pw:
+                try:
+                    browser = pw.chromium.launch(headless=True)
+                except PlaywrightError as exc:
+                    logger.error("auth: could not launch headless Chromium (%s)", exc)
+                    return False
+                try:
+                    page = browser.new_context().new_page()
+                    page.set_default_navigation_timeout(self.nav_timeout_ms)
+                    page.on("response", _on_response)
+                    try:
+                        page.goto(authorize_url, wait_until="load")
+                    except Exception as exc:  # noqa: BLE001 — see docstring: a nav error
+                        # chasing a since-captured (or unreachable) redirect isn't fatal
+                        logger.debug("auth: initial navigation ended with %s", exc)
+                    if "code" not in callback:
+                        self._fill_and_submit_login(page)
+                        deadline = time.time() + self.nav_timeout_ms / 1000
+                        while "code" not in callback and time.time() < deadline:
+                            page.wait_for_timeout(200)
+                finally:
+                    browser.close()
+        except Exception as exc:  # noqa: BLE001 — a crashed browser must not sink the scan
+            logger.error("auth: authorization_code browser flow failed: %s", exc)
+            return False
+
+        code = callback.get("code")
+        if not code:
+            logger.error(
+                "auth: authorization_code flow did not yield a code — the login may "
+                "have been rejected, or redirect_uri doesn't match what the "
+                "authorization server has registered for this client"
+            )
+            return False
+        if callback.get("state") != state:
+            logger.error("auth: authorization_code flow state mismatch — aborting")
+            return False
+
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": self.redirect_uri or "",
+            "client_id": self.client_id,
+            "code_verifier": verifier,
+        }
+        if self.client_secret:
+            data["client_secret"] = self.client_secret
+        return self._submit_token_request(requester, data, refreshed=False)
+
+    def _fill_and_submit_login(self, page: Any) -> None:
+        """
+        Fill the rendered login page's inputs (matched by ``name``) from
+        ``login_credentials`` and submit. Best-effort per field: a selector
+        that doesn't match is logged and skipped rather than aborting the
+        whole flow, since the subsequent wait for ``redirect_uri`` is what
+        ultimately decides success.
+        """
+        for name, value in self.login_credentials.items():
+            try:
+                page.fill(f'input[name="{name}"]', value, timeout=self.nav_timeout_ms)
+            except Exception as exc:  # noqa: BLE001 — best effort, see docstring
+                logger.debug("auth: could not fill login field %r: %s", name, exc)
+        try:
+            page.click('button[type="submit"], input[type="submit"]', timeout=self.nav_timeout_ms)
+        except Exception:  # noqa: BLE001 — no submit button found, fall back to Enter
+            try:
+                page.keyboard.press("Enter")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("auth: could not submit login form: %s", exc)
+
+
+def _pkce_pair() -> Tuple[str, str]:
+    """Generate an RFC 7636 PKCE ``(code_verifier, code_challenge)`` pair (S256)."""
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
 
 
 def parse_login_data(raw: str) -> Dict[str, str]:

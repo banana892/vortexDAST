@@ -115,6 +115,24 @@ vortex -u https://api.app.local/ \
   --oauth2-username bob --oauth2-password s3cret
 ```
 
+`authorization_code` (+ PKCE, RFC 7636) is the interactive grant: a real
+headless Chromium (bundled with the dynamic-crawl dependency) is driven
+through the identity provider's own login page, filling `--oauth2-login-data`
+into the rendered form and submitting it, then the authorization code is
+read out of the server's redirect back to `--oauth2-redirect-uri` — which
+never needs to resolve to anything real — and exchanged for a token with the
+PKCE verifier:
+
+```bash
+vortex -u https://api.app.local/ \
+  --oauth2-token-url https://idp.local/oauth/token \
+  --oauth2-grant-type authorization_code \
+  --oauth2-client-id my-client \
+  --oauth2-authorize-url https://idp.local/oauth/authorize \
+  --oauth2-redirect-uri https://app.local/callback \
+  --oauth2-login-data "username=bob&password=s3cret"
+```
+
 Role matrix (opt-in; logs in a *second* identity with the same login
 mechanism and diffs what each can reach — surfaces vertical privilege
 escalation on sensitive paths and, for any object-reference parameter,
@@ -256,8 +274,10 @@ Key flag groups (run `vortex -h` for the full list):
   (role-matrix: a second identity via the same login mechanism),
   `--oauth2-token-url` + `--oauth2-grant-type` + `--oauth2-client-id` +
   `--oauth2-client-secret` + `--oauth2-username` + `--oauth2-password` +
-  `--oauth2-scope` (OAuth2/OIDC bearer-token auth, mutually exclusive with
-  `--login-url`)
+  `--oauth2-scope` (OAuth2/OIDC bearer-token auth — `password` or
+  `client_credentials`; mutually exclusive with `--login-url`), plus
+  `--oauth2-authorize-url` + `--oauth2-redirect-uri` + `--oauth2-login-data`
+  for `--oauth2-grant-type authorization_code` (+ PKCE, browser-driven)
 - **Network recon (opt-in):** `--port-scan`, `--ports`, `--subnet`,
   `--max-subnet-hosts`, `--subnet-workers`
 - **External tools (opt-in):** `--tools` (`all` or a comma list, e.g.

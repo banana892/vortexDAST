@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import secrets
 import threading
@@ -11,9 +12,14 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from core.auth import FormLoginAuthenticator, OAuth2Authenticator, parse_login_data, totp
+from core.auth import (
+    FormLoginAuthenticator,
+    OAuth2Authenticator,
+    _pkce_pair,
+    parse_login_data,
+    totp,
+)
 from core.requester import Requester
-
 
 # ── parse_login_data ──────────────────────────────────────────────────────────
 
@@ -708,6 +714,15 @@ def test_oauth2_invalid_grant_type_rejected():
     with pytest.raises(ValueError):
         OAuth2Authenticator(
             token_url="https://example.test/token",
+            grant_type="implicit",
+            client_id="cid",
+        )
+
+
+def test_oauth2_authorization_code_requires_authorize_url_redirect_uri_and_login_data():
+    with pytest.raises(ValueError):
+        OAuth2Authenticator(
+            token_url="https://example.test/token",
             grant_type="authorization_code",
             client_id="cid",
         )
@@ -762,5 +777,276 @@ def test_oauth2_session_recovery_refreshes_via_refresh_token(oauth2_server):
         assert "protected area" in resp.text  # transparently recovered
         assert oauth2_server.grant_counts.get("refresh_token") == 1
         assert oauth2_server.grant_counts.get("client_credentials") == 1  # not re-run
+    finally:
+        req.close()
+
+
+# ── authorization_code + PKCE (real headless Chromium) ────────────────────────
+#
+# Playwright + Chromium are a core dependency (same as tests/test_dom_watcher.py),
+# so this drives a *real* headless browser through a fake IdP's login page —
+# the actual interactive redirect this grant exists to automate, not a mock of it.
+
+
+def test_pkce_pair_challenge_matches_verifier():
+    verifier, challenge = _pkce_pair()
+    assert 43 <= len(verifier) <= 128
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    assert challenge == expected
+    assert "=" not in challenge  # unpadded, URL-safe per RFC 7636
+
+
+class _AuthCodeServer:
+    """
+    Minimal OAuth2 authorization_code + PKCE identity provider:
+      GET  /authorize?response_type=code&client_id=...&redirect_uri=...&state=...
+           &code_challenge=...&code_challenge_method=S256
+           -> an HTML login form (inputs: user, pass) carrying the above as
+              hidden fields so the POST below can see them.
+      POST /authorize (user, pass, + the hidden fields)
+           -> wrong creds: 200 "Invalid credentials" (no redirect)
+           -> right creds: 302 Location: <redirect_uri>?code=<code>&state=<state>
+              (code is single-use, bound to the code_challenge that minted it)
+      POST /token (grant_type=authorization_code|refresh_token, ...)
+           -> authorization_code: verifies sha256(code_verifier) (b64url,
+              unpadded) matches the stored code_challenge and the code hasn't
+              already been redeemed.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._codes: dict[str, dict] = {}
+        self.current_access_token: str | None = None
+        self.current_refresh_token: str | None = None
+        self.grant_counts: dict[str, int] = {}
+        self.authorize_hits = 0
+        server = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def _send(self, code, body):
+                data = body.encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _json(self, code, payload):
+                data = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if urlsplit(self.path).path == "/authorize":
+                    with server._lock:
+                        server.authorize_hits += 1
+                    qs = parse_qs(urlsplit(self.path).query)
+                    hidden = "".join(
+                        f'<input type="hidden" name="{k}" value="{v[0]}">'
+                        for k, v in qs.items()
+                    )
+                    self._send(
+                        200,
+                        f'<html><body><form method="post" action="/authorize">{hidden}'
+                        '<input name="user"><input name="pass" type="password">'
+                        '<button type="submit">Log in</button>'
+                        "</form></body></html>",
+                    )
+                    return
+                if urlsplit(self.path).path == "/callback":
+                    # The code is read from the redirect's Location header before this
+                    # is even dispatched; the browser may still land here afterward.
+                    self._send(200, "callback reached")
+                    return
+                self._send(404, "nope")
+
+            def do_POST(self):
+                path = urlsplit(self.path).path
+                n = int(self.headers.get("Content-Length") or 0)
+                form = parse_qs(self.rfile.read(n).decode())
+
+                if path == "/authorize":
+                    user = (form.get("user") or [None])[0]
+                    pw = (form.get("pass") or [None])[0]
+                    redirect_uri = (form.get("redirect_uri") or [None])[0]
+                    state = (form.get("state") or [""])[0]
+                    challenge = (form.get("code_challenge") or [None])[0]
+                    if user != "admin" or pw != "pw":
+                        self._send(200, "Invalid credentials")
+                        return
+                    code = secrets.token_hex(8)
+                    with server._lock:
+                        server._codes[code] = {
+                            "challenge": challenge,
+                            "redirect_uri": redirect_uri,
+                            "used": False,
+                        }
+                    sep = "&" if "?" in (redirect_uri or "") else "?"
+                    location = f"{redirect_uri}{sep}code={code}&state={state}"
+                    self.send_response(302)
+                    self.send_header("Location", location)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+
+                if path == "/token":
+                    grant = (form.get("grant_type") or [None])[0]
+                    with server._lock:
+                        server.grant_counts[grant] = server.grant_counts.get(grant, 0) + 1
+                        ok = False
+                        if grant == "authorization_code":
+                            code = (form.get("code") or [None])[0]
+                            verifier = (form.get("code_verifier") or [None])[0]
+                            entry = server._codes.get(code)
+                            if entry and not entry["used"] and verifier:
+                                digest = hashlib.sha256(verifier.encode()).digest()
+                                expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+                                ok = expected == entry["challenge"]
+                            if ok:
+                                entry["used"] = True
+                        elif grant == "refresh_token":
+                            ok = (form.get("refresh_token") or [None])[0] == server.current_refresh_token
+                        if not ok:
+                            self._json(400, {"error": "invalid_grant"})
+                            return
+                        server.current_access_token = secrets.token_hex(8)
+                        server.current_refresh_token = secrets.token_hex(8)
+                        self._json(
+                            200,
+                            {
+                                "access_token": server.current_access_token,
+                                "expires_in": 3600,
+                                "refresh_token": server.current_refresh_token,
+                            },
+                        )
+                    return
+
+                self._send(404, "nope")
+
+            def log_message(self, *a):
+                pass
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._httpd.server_address[1]
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def base(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def close(self) -> None:
+        self._httpd.shutdown()
+
+
+@pytest.fixture
+def authcode_server():
+    s = _AuthCodeServer()
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+_AUTHCODE_TIMEOUT_MS = 3000
+
+
+def test_oauth2_authorization_code_pkce_full_flow(authcode_server):
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{authcode_server.base}/token",
+            grant_type="authorization_code",
+            client_id="cid",
+            authorize_url=f"{authcode_server.base}/authorize",
+            redirect_uri=f"{authcode_server.base}/callback",
+            login_credentials={"user": "admin", "pass": "pw"},
+            nav_timeout_ms=_AUTHCODE_TIMEOUT_MS,
+        )
+        assert auth.login(req) is True
+        assert req.session.headers["Authorization"] == f"Bearer {authcode_server.current_access_token}"
+        assert authcode_server.grant_counts.get("authorization_code") == 1
+        assert authcode_server.authorize_hits == 1
+    finally:
+        req.close()
+
+
+def test_oauth2_authorization_code_wrong_credentials_fails(authcode_server):
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{authcode_server.base}/token",
+            grant_type="authorization_code",
+            client_id="cid",
+            authorize_url=f"{authcode_server.base}/authorize",
+            redirect_uri=f"{authcode_server.base}/callback",
+            login_credentials={"user": "admin", "pass": "WRONG"},
+            nav_timeout_ms=_AUTHCODE_TIMEOUT_MS,
+        )
+        assert auth.login(req) is False
+        assert "Authorization" not in req.session.headers
+    finally:
+        req.close()
+
+
+def test_oauth2_authorization_code_reused_code_is_rejected(authcode_server):
+    """A code redeemed once can't be redeemed again (single-use, per RFC 6749 §4.1.2)."""
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{authcode_server.base}/token",
+            grant_type="authorization_code",
+            client_id="cid",
+            authorize_url=f"{authcode_server.base}/authorize",
+            redirect_uri=f"{authcode_server.base}/callback",
+            login_credentials={"user": "admin", "pass": "pw"},
+            nav_timeout_ms=_AUTHCODE_TIMEOUT_MS,
+        )
+        assert auth.login(req) is True
+        # Replay the same code/verifier straight at the token endpoint.
+        last_code = next(iter(authcode_server._codes))
+        resp, _ = req.post(
+            f"{authcode_server.base}/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": last_code,
+                "client_id": "cid",
+                "redirect_uri": f"{authcode_server.base}/callback",
+                "code_verifier": "replayed-does-not-matter-already-used",
+            },
+        )
+        assert resp.status_code == 400
+    finally:
+        req.close()
+
+
+def test_oauth2_authorization_code_reauthenticate_without_refresh_token_redoes_browser_login(
+    authcode_server,
+):
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{authcode_server.base}/token",
+            grant_type="authorization_code",
+            client_id="cid",
+            authorize_url=f"{authcode_server.base}/authorize",
+            redirect_uri=f"{authcode_server.base}/callback",
+            login_credentials={"user": "admin", "pass": "pw"},
+            nav_timeout_ms=_AUTHCODE_TIMEOUT_MS,
+        )
+        assert auth.login(req) is True
+        first_token = authcode_server.current_access_token
+        auth._refresh_token = None  # simulate no refresh token ever issued
+        assert auth.reauthenticate(req) is True
+        assert authcode_server.grant_counts.get("authorization_code") == 2
+        assert authcode_server.authorize_hits == 2
+        assert req.session.headers["Authorization"] == f"Bearer {authcode_server.current_access_token}"
+        assert authcode_server.current_access_token != first_token
     finally:
         req.close()

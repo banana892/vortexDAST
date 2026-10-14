@@ -964,14 +964,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--oauth2-grant-type",
-        choices=["password", "client_credentials"],
+        choices=["password", "client_credentials", "authorization_code"],
         default="client_credentials",
         help=(
             "OAuth2 grant to use (default: client_credentials). 'password' "
             "(Resource Owner Password Credentials) needs --oauth2-username/"
             "--oauth2-password; 'client_credentials' needs only the client "
-            "id/secret. The interactive authorization_code grant (browser "
-            "redirect) is not supported."
+            "id/secret; 'authorization_code' (+ PKCE) drives a real headless "
+            "browser through the authorization server's own login page and "
+            "needs --oauth2-authorize-url, --oauth2-redirect-uri and "
+            "--oauth2-login-data."
         ),
     )
     parser.add_argument(
@@ -1003,6 +1005,33 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SCOPE",
         help="Optional space-separated OAuth2 scope string (e.g. 'openid profile').",
+    )
+    parser.add_argument(
+        "--oauth2-authorize-url",
+        default=None,
+        metavar="URL",
+        help="Authorization endpoint, for --oauth2-grant-type authorization_code.",
+    )
+    parser.add_argument(
+        "--oauth2-redirect-uri",
+        default=None,
+        metavar="URL",
+        help=(
+            "Registered redirect URI, for --oauth2-grant-type authorization_code. "
+            "Doesn't need to resolve to anything real — the authorization code "
+            "is read from the IdP's redirect response before the browser gets "
+            "there."
+        ),
+    )
+    parser.add_argument(
+        "--oauth2-login-data",
+        default=None,
+        metavar="FIELDS",
+        help=(
+            "IdP login-form fields ('name=value&...' syntax, same as "
+            "--login-data), for --oauth2-grant-type authorization_code. Filled "
+            "into the rendered login page's inputs by name and submitted."
+        ),
     )
     parser.add_argument(
         "--role2-login-data",
@@ -1606,6 +1635,21 @@ def run_scan(args: argparse.Namespace) -> int:
         if not getattr(args, "oauth2_client_id", None):
             print("[ERROR] --oauth2-token-url requires --oauth2-client-id.", file=sys.stderr)
             return 2
+        oauth2_login_credentials = None
+        if args.oauth2_grant_type == "authorization_code":
+            if not (args.oauth2_authorize_url and args.oauth2_redirect_uri and args.oauth2_login_data):
+                print(
+                    "[ERROR] --oauth2-grant-type authorization_code requires "
+                    "--oauth2-authorize-url, --oauth2-redirect-uri and "
+                    "--oauth2-login-data.",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                oauth2_login_credentials = parse_login_data(args.oauth2_login_data)
+            except ValueError as exc:
+                print(f"[ERROR] invalid --oauth2-login-data: {exc}", file=sys.stderr)
+                return 2
         try:
             oauth2_authenticator = OAuth2Authenticator(
                 token_url=args.oauth2_token_url,
@@ -1615,6 +1659,9 @@ def run_scan(args: argparse.Namespace) -> int:
                 username=args.oauth2_username,
                 password=args.oauth2_password,
                 scope=args.oauth2_scope,
+                authorize_url=args.oauth2_authorize_url,
+                redirect_uri=args.oauth2_redirect_uri,
+                login_credentials=oauth2_login_credentials,
             )
         except ValueError as exc:
             print(f"[ERROR] invalid OAuth2 configuration: {exc}", file=sys.stderr)
