@@ -408,13 +408,11 @@ class SQLiCheckModule(BaseScannerModule):
                     if finding:
                         findings.append(finding)
 
-                # shortcut: boolean/time-based blind need an "original value"
-                # to extend with a true/false SQL condition — meaningful for
-                # a body leaf, not for a REST path segment swap. Error-based
-                # coverage above already applies to both kinds of target.
-                if target.kind != "body":
-                    continue
-
+                # Boolean/time-based blind both just extend target.original
+                # with a true/false (or delay) SQL condition via
+                # target.build() — that works identically for a JSON body
+                # leaf and a REST path segment (e.g. the "42" in
+                # "/users/42"), so both kinds get the same coverage here.
                 blind_finding = self._boolean_blind_json_check(target, baseline_body)
                 if blind_finding:
                     findings.append(blind_finding)

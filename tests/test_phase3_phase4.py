@@ -897,6 +897,56 @@ class TestSQLiCheckModule:
         path_findings = [f for f in findings if f.parameter and f.parameter.startswith("path:")]
         assert len(path_findings) >= 1
 
+    def test_boolean_blind_detected_for_json_path_segment(self) -> None:
+        """Boolean-blind must also run against a REST path segment, not just a body leaf."""
+        module = self._module()
+        large_resp = _mock_response("<html>" + "X" * 5000 + "</html>")
+        small_resp = _mock_response("<html>no</html>")
+        baseline_resp = _mock_response("<html>OK</html>")
+
+        def fake_post(url, **kwargs):
+            if url.endswith("42' AND '1'='1"):
+                return large_resp, None
+            if url.endswith("42' AND '1'='2"):
+                return small_resp, None
+            return baseline_resp, None
+
+        module.requester.post.side_effect = fake_post
+        captured = CapturedJsonRequest(
+            url="https://target.com/api/widgets/42", method="POST", body={"qty": 1}
+        )
+        ep = _make_endpoint(json_requests=[captured])
+        findings = module.run(ep)
+
+        blind_findings = [f for f in findings if "Boolean-Blind" in f.title]
+        assert len(blind_findings) >= 1
+        assert blind_findings[0].parameter.startswith("path:")
+
+    def test_time_based_blind_detected_for_json_path_segment(self) -> None:
+        """Time-based blind must also run against a REST path segment, not just a body leaf."""
+        module = self._module()
+        baseline_resp = _mock_response("<html>OK</html>", elapsed=0.05)
+        delayed_resp = _mock_response("<html>OK</html>", elapsed=4.5)
+
+        def fake_post(url, **kwargs):
+            if "SLEEP" in url:
+                return delayed_resp, None
+            return baseline_resp, None
+
+        module.requester.post.side_effect = fake_post
+        captured = CapturedJsonRequest(
+            url="https://target.com/api/widgets/42", method="POST", body={"qty": 1}
+        )
+        ep = _make_endpoint(json_requests=[captured])
+        findings = module.run(ep)
+
+        time_findings = [
+            f for f in findings
+            if "Time-Based" in f.title and f.parameter and f.parameter.startswith("path:")
+        ]
+        assert len(time_findings) == 1
+        assert time_findings[0].extra["dbms"] == "MySQL"
+
     def test_no_captured_json_requests_adds_nothing(self) -> None:
         module = self._module()
         module.requester.get.return_value = (_mock_response("<html>OK</html>"), None)

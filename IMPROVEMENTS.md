@@ -318,11 +318,13 @@ own quality:
      `_analyse_error`, `_evaluate_operator_diff` for nosql;
      `_check_reflection` for xss). `BaseScannerModule.run(endpoint)` keeps
      its single signature — no new module-interface hook.
-     Operator-injection and boolean/time-based blind checks only run
-     against body leaves (`FuzzTarget.kind == "body"`), since replacing a
-     leaf's value with `{"$ne": ...}` or extending it with a true/false SQL
-     condition has no equivalent for a URL path segment; error-based
-     coverage still runs against both kinds. `DEFAULT_MAX_LEAVES` (15)
+     Operator-injection only runs against body leaves
+     (`FuzzTarget.kind == "body"`), since replacing a leaf's value with
+     `{"$ne": ...}` has no equivalent for a URL path segment; error-based
+     coverage runs against both kinds. `sqli_check`'s boolean/time-based
+     blind originally also skipped path segments on the same assumption,
+     but that turned out not to hold — both now run against a path segment
+     too (see §5 item 6, "Shallow detectors", below). `DEFAULT_MAX_LEAVES` (15)
      bounds per-request volume, same concern as every other adapter's own
      cap. **Correction from the original scope above:** `nosql_check.py`'s
      pre-existing flat form-to-JSON hack (`_fuzz_json_body`) was left as
@@ -637,7 +639,20 @@ Ordered by impact; several are now *resolved by the plan above*.
      clears both a relative (60% of the payload's own injected delay) and
      an absolute (2s) threshold *and* reproduces on a second confirmation
      request — so ordinary network/CDN jitter on a slow target can't
-     masquerade as an injected delay.
+     masquerade as an injected delay. **Follow-up — ✅ shipped:** boolean-
+     and time-based blind now also run against a captured JSON request's
+     REST-style path segment (e.g. the `42` in `/users/42`), not just a
+     JSON body leaf. The original scoping call (Phase D's API-testing
+     item, above) assumed these needed a leaf-shaped "original value" to
+     extend with a true/false SQL condition and so had no path-segment
+     equivalent — but `FuzzTarget.build()` already extends a path
+     segment's own value the same append-style way it extends a body
+     leaf's, so `_boolean_blind_json_check`/`_time_based_blind_json_check`
+     needed no new mechanism, just dropping the `if target.kind != "body":
+     continue` gate that had skipped them. (Operator-injection-style
+     replacement, e.g. nosql's `{"$ne": ...}`, is the one check that
+     genuinely has no path-segment equivalent, since a URL segment can't
+     hold a non-string JSON value — that gate stays.)
    - *`traversal_check` was GET-only* — ✅ *fixed.* Every POST form now
      gets its own baseline POST (its own fields, unmodified) and each
      field is then fuzzed via POST against that same baseline, through a
@@ -1056,3 +1071,16 @@ Ordered by impact; several are now *resolved by the plan above*.
   Verified end-to-end against a real two-endpoint local server (distinct
   login URLs, distinct field names, distinct session cookies) — both
   identities authenticate independently.
+- 2026-10-15 — `sqli_check`'s boolean-/time-based blind extended to REST
+  path segments: the `if target.kind != "body": continue` gate in
+  `_fuzz_json_requests` was removed, since the premise behind it didn't
+  hold — `FuzzTarget.build()` extends a path segment's own value the same
+  append-style way it extends a body leaf's (e.g. `42` →
+  `42' AND '1'='1`), so `_boolean_blind_json_check`/
+  `_time_based_blind_json_check` needed no new mechanism at all, just the
+  gate removed. Error-based coverage already ran against both kinds, so
+  this closes the gap between it and the other two checks. New tests
+  confirm both fire correctly against a path segment (`/api/widgets/42` →
+  a Boolean-blind finding on a length-differential response, and a
+  reproducing MySQL `SLEEP()` time-based finding), each reported with a
+  `path:segment[...]` parameter label.
