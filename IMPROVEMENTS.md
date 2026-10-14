@@ -334,13 +334,15 @@ own quality:
      `tests/test_json_fuzz.py` covers the primitives directly; each
      module's own test file covers the wiring (nested-leaf error/operator
      detection, path-segment fuzzing, boolean-/time-based blind on a leaf).
-  3. ✅ *shipped:* **Spec import (OpenAPI 3.x, Swagger 2.0, Postman
+  3. ✅ *shipped (local file, URL fetch, and schema composition all
+     complete):* **Spec import (OpenAPI 3.x, Swagger 2.0, Postman
      Collection v2.1)** — the different-input-source producer this was
      scoped to be: `core/spec_import.py`'s `import_openapi_spec`/
-     `import_postman_collection` parse a *local* spec file (`--openapi
-     PATH` / `--postman PATH`, JSON or YAML for OpenAPI/Swagger) into the
-     exact same synthetic `CrawledEndpoint`/`CapturedJsonRequest` output
-     Phase 1's live capture produces, merged into the scan the same
+     `import_postman_collection` parse a spec (`--openapi PATH_OR_URL` /
+     `--postman PATH_OR_URL`, JSON or YAML for OpenAPI/Swagger — a local
+     file path or an `http(s)://` URL fetched directly, interchangeably)
+     into the exact same synthetic `CrawledEndpoint`/`CapturedJsonRequest`
+     output Phase 1's live capture produces, merged into the scan the same
      dedupe-by-URL way as the dynamic crawl — **zero changes to Phase 2's
      fuzzing engine** to consume them, confirming the original scoping
      call. Every path is rebased onto the scan's actual `--target`,
@@ -357,18 +359,30 @@ own quality:
      almost always a saved literal example already, so it's just
      `json.loads()`. GET-style operations become plain `query_params`
      endpoints, reusing the GET fuzzers that already exist — only
-     POST/PUT/PATCH-with-a-body becomes a `CapturedJsonRequest`. Local
-     file input only in v1 — no URL-fetch option, no auto-discovery of
-     well-known spec paths (`/openapi.json`, …); a missing/malformed file
-     degrades to an empty import with a logged error, never failing the
-     scan. `tests/test_spec_import.py` covers both formats, nested
-     Postman folders, `$ref` resolution (including the self-referential
-     case), and every degrade path.
+     POST/PUT/PATCH-with-a-body becomes a `CapturedJsonRequest`. A
+     missing/unreachable/malformed spec degrades to an empty import with a
+     logged error, never failing the scan. `tests/test_spec_import.py`
+     covers both formats, nested Postman folders, `$ref` resolution
+     (including the self-referential case), URL fetch (success, connection
+     failure, HTTP error status, all via a real local server), and every
+     degrade path. **Known limit:** no auto-discovery of a spec at a
+     well-known path (`/openapi.json`, …) when neither flag is given at
+     all — the operator always names the spec explicitly, whether by path
+     or URL.
+     - ✅ *shipped:* **`allOf`/`oneOf`/`anyOf` schema composition** —
+       `_synthesize_example` now merges every `allOf` subschema's
+       synthesized object (plus the schema's own `type`/`properties` if it
+       declares both alongside `allOf` at once — the common "base type +
+       extension" pattern), and picks the first listed `oneOf`/`anyOf`
+       variant as the one representative shape to synthesize, rather than
+       enumerating every alternative — this module still produces one
+       plausible request body per operation to fuzz, not a combinatorial
+       set. Previously any schema using these keywords fell through to the
+       bare `"example"` string placeholder regardless of its actual
+       intended shape.
   - **Non-goals:** schema-aware fuzzing (type coercion, enum violations) —
     fuzzing still only substitutes existing injection probes into JSON
-    leaves/path segments, it doesn't reason about a schema. `oneOf`/
-    `allOf`/`anyOf` schema composition isn't resolved during synthesis —
-    upgrade if a real spec needs it.
+    leaves/path segments, it doesn't reason about a schema.
 - **Authenticated scanning — follow-ups** on the shipped scaffold (§5.1):
   - ✅ *shipped:* **login-page CSRF-token harvesting** — `core/auth.py`
     GETs the login (and MFA) page first and merges any hidden form fields
@@ -982,3 +996,15 @@ Ordered by impact; several are now *resolved by the plan above*.
   still isn't a probe point — `core/json_fuzz.py`'s path-segment target
   only supports appending to the segment, not the full-value replacement an
   OOB payload needs.
+- 2026-10-15 — `spec_import` closed both remaining limits: `--openapi`/
+  `--postman` now accept an `http(s)://` URL (fetched directly via
+  `requests`) interchangeably with a local file path, and
+  `_synthesize_example` resolves `allOf`/`oneOf`/`anyOf` schema composition
+  instead of falling through to a bare `"example"` placeholder — `allOf` is
+  merged (every subschema, plus the schema's own type/properties if
+  declared alongside it), `oneOf`/`anyOf` synthesize the first listed
+  variant. Verified with new tests: URL fetch (success, connection
+  failure, HTTP error status, via a real local server) and all three
+  composition keywords (including the "`allOf` + own properties at once"
+  shape). Only known limit left: no auto-discovery of a spec at a
+  well-known path when neither flag is given.

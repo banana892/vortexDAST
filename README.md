@@ -183,6 +183,13 @@ vortex -u https://app.local --openapi openapi.yaml
 vortex -u https://app.local --postman collection.json
 ```
 
+Either flag also accepts an `http(s)://` URL, fetched directly instead of
+read from disk:
+
+```bash
+vortex -u https://app.local --openapi https://app.local/openapi.json
+```
+
 Network recon (opt-in; scans the target host, or an explicit range):
 
 ```bash

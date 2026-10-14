@@ -190,6 +190,134 @@ class TestOpenApi3:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Schema composition: allOf / oneOf / anyOf
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _body_request_spec(schema: dict) -> dict:
+    return {
+        "openapi": "3.0.0",
+        "paths": {
+            "/widgets": {
+                "post": {
+                    "requestBody": {
+                        "content": {"application/json": {"schema": schema}}
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "Base": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string", "example": "gadget"}},
+                }
+            }
+        },
+    }
+
+
+class TestSchemaComposition:
+    def test_all_of_merges_subschemas(self, tmp_path) -> None:
+        schema = {
+            "allOf": [
+                {"$ref": "#/components/schemas/Base"},
+                {"type": "object", "properties": {"qty": {"type": "integer"}}},
+            ]
+        }
+        path = _write(tmp_path, "spec.json", json.dumps(_body_request_spec(schema)))
+        endpoints = import_openapi_spec(path, _BASE_URL)
+        assert endpoints[0].json_requests[0].body == {"name": "gadget", "qty": 1}
+
+    def test_all_of_and_own_properties_both_merged(self, tmp_path) -> None:
+        """allOf *and* the schema's own properties declared at once."""
+        schema = {
+            "allOf": [{"$ref": "#/components/schemas/Base"}],
+            "type": "object",
+            "properties": {"qty": {"type": "integer"}},
+        }
+        path = _write(tmp_path, "spec.json", json.dumps(_body_request_spec(schema)))
+        endpoints = import_openapi_spec(path, _BASE_URL)
+        assert endpoints[0].json_requests[0].body == {"name": "gadget", "qty": 1}
+
+    def test_one_of_picks_first_variant(self, tmp_path) -> None:
+        schema = {
+            "oneOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}},
+                {"type": "object", "properties": {"b": {"type": "integer"}}},
+            ]
+        }
+        path = _write(tmp_path, "spec.json", json.dumps(_body_request_spec(schema)))
+        endpoints = import_openapi_spec(path, _BASE_URL)
+        assert endpoints[0].json_requests[0].body == {"a": "example"}
+
+    def test_any_of_picks_first_variant(self, tmp_path) -> None:
+        schema = {"anyOf": [{"type": "integer"}, {"type": "string"}]}
+        path = _write(tmp_path, "spec.json", json.dumps(_body_request_spec(schema)))
+        endpoints = import_openapi_spec(path, _BASE_URL)
+        assert endpoints[0].json_requests[0].body == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fetching a spec directly from an http(s):// URL
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFetchFromUrl:
+    def test_openapi_spec_fetched_from_url(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        body = json.dumps({"openapi": "3.0.0", "paths": {"/widgets": {"get": {}}}}).encode()
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/openapi.json"
+            endpoints = import_openapi_spec(url, _BASE_URL)
+            assert len(endpoints) == 1
+            assert endpoints[0].url == f"{_BASE_URL}/widgets"
+        finally:
+            server.shutdown()
+
+    def test_fetch_failure_returns_empty(self) -> None:
+        # Nothing listens on this port — a connection error, not a hang or a crash.
+        assert import_openapi_spec("http://127.0.0.1:1/openapi.json", _BASE_URL) == []
+
+    def test_http_error_status_returns_empty(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404)
+                self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/openapi.json"
+            assert import_openapi_spec(url, _BASE_URL) == []
+        finally:
+            server.shutdown()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Swagger 2.0
 # ─────────────────────────────────────────────────────────────────────────────
 

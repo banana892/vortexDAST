@@ -804,21 +804,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--openapi",
         default=None,
-        metavar="PATH",
+        metavar="PATH_OR_URL",
         help=(
-            "Import endpoints from a local OpenAPI 3.x or Swagger 2.0 spec "
-            "file (JSON or YAML). Paths are rebased onto the scan target; "
-            "each operation's JSON body/query params are fuzzed the same "
-            "way a captured --dynamic JSON request is."
+            "Import endpoints from an OpenAPI 3.x or Swagger 2.0 spec (JSON "
+            "or YAML) — a local file path, or an http(s):// URL to fetch it "
+            "from directly. Paths are rebased onto the scan target; each "
+            "operation's JSON body/query params are fuzzed the same way a "
+            "captured --dynamic JSON request is."
         ),
     )
     parser.add_argument(
         "--postman",
         default=None,
-        metavar="PATH",
+        metavar="PATH_OR_URL",
         help=(
-            "Import endpoints from a local Postman Collection v2.1 JSON "
-            "export. Paths are rebased onto the scan target; each "
+            "Import endpoints from a Postman Collection v2.1 JSON export — "
+            "a local file path, or an http(s):// URL to fetch it from "
+            "directly. Paths are rebased onto the scan target; each "
             "request's JSON body/query params are fuzzed the same way a "
             "captured --dynamic JSON request is."
         ),

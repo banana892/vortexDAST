@@ -1,11 +1,12 @@
 """
 VortexDAST – core/spec_import.py
 ────────────────────────────────────────────────────────────────────────────
-Import endpoints from a local OpenAPI 3.x / Swagger 2.0 spec or a Postman
-Collection v2.1 file — Phase 3 of the scoped "API testing" work
-(IMPROVEMENTS.md), the last of three endpoint sources feeding the same
-fuzzing engine Phase 1 (``core/dom_watcher.py``'s passive JSON capture) and
-Phase 2 (``core/json_fuzz.py``'s leaf/path-segment fuzzing) already built.
+Import endpoints from an OpenAPI 3.x / Swagger 2.0 spec or a Postman
+Collection v2.1 file — local, or fetched directly from a URL — Phase 3 of
+the scoped "API testing" work (IMPROVEMENTS.md), the last of three endpoint
+sources feeding the same fuzzing engine Phase 1 (``core/dom_watcher.py``'s
+passive JSON capture) and Phase 2 (``core/json_fuzz.py``'s leaf/path-segment
+fuzzing) already built.
 
 Design
 ------
@@ -20,8 +21,11 @@ merge, so the fuzzing engine needs zero changes to consume them.
 
 * OpenAPI 3.x / Swagger 2.0: example values come from the spec's own
   ``example``/``default``/``enum`` where present, else synthesized per JSON
-  Schema ``type`` (shortcut: no ``oneOf``/``allOf``/``anyOf`` composition —
-  the first matching simple type wins; upgrade if a real spec needs more).
+  Schema ``type``. ``allOf`` is merged (every subschema, plus the schema's
+  own type/properties if it declares both at once); ``oneOf``/``anyOf``
+  pick the first listed variant as the one representative shape — this
+  module produces one plausible request body to fuzz, not every
+  schema-valid alternative.
 * Postman Collection v2.1: ``request.body.raw`` is almost always a literal
   saved example already, so it's just ``json.loads()`` — no synthesis.
 * Every path is rebased onto ``base_url`` (the scan's actual ``--target``),
@@ -33,6 +37,11 @@ merge, so the fuzzing engine needs zero changes to consume them.
   ``core/json_fuzz.py``'s existing ``looks_like_object_reference`` already
   recognises as fuzzable, so REST path-segment fuzzing needs no changes
   either.
+* ``--openapi``/``--postman`` accept a local path or an ``http(s)://`` URL
+  interchangeably (the latter fetched directly, operator-supplied so no
+  different trust level than ``--target`` itself) — no auto-discovery of a
+  spec at a well-known path (``/openapi.json``, …) when neither flag is
+  given at all; that remains a follow-up.
 """
 
 from __future__ import annotations
@@ -43,6 +52,7 @@ import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+import requests
 import yaml
 
 from .crawler import CapturedJsonRequest, CrawledEndpoint
@@ -56,16 +66,31 @@ _OPERATION_METHODS = ("get", "post", "put", "patch", "delete", "head", "options"
 
 _PATH_PLACEHOLDER = "1"
 _MAX_SCHEMA_DEPTH = 6
+#: Timeout for fetching a spec from an http(s):// URL.
+_FETCH_TIMEOUT = 15.0
 
 
 def _load_spec_file(path: str) -> Optional[Dict[str, Any]]:
-    """Load a spec file as JSON or YAML (OpenAPI/Swagger allow either; Postman is JSON)."""
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            raw = fh.read()
-    except OSError as exc:
-        logger.error("Could not read spec file %s: %s", path, exc)
-        return None
+    """
+    Load a spec as JSON or YAML (OpenAPI/Swagger allow either; Postman is
+    JSON) — from a local file, or fetched directly when ``path`` is itself
+    an ``http(s)://`` URL.
+    """
+    if path.startswith(("http://", "https://")):
+        try:
+            resp = requests.get(path, timeout=_FETCH_TIMEOUT)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            logger.error("Could not fetch spec from %s: %s", path, exc)
+            return None
+        raw = resp.text
+    else:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                raw = fh.read()
+        except OSError as exc:
+            logger.error("Could not read spec file %s: %s", path, exc)
+            return None
 
     try:
         doc = json.loads(raw)
@@ -211,6 +236,14 @@ def _synthesize_example(schema: Any, doc: Dict[str, Any], _depth: int = 0) -> An
     own example/default/enum when present, else a type-appropriate
     placeholder. Depth-capped so a self-referential ``$ref`` degrades to
     ``None`` instead of recursing forever.
+
+    ``allOf`` is merged — every subschema's synthesized value, plus the
+    schema's own ``type``/``properties`` if it declares both at once (the
+    common "base type + extension" composition pattern,
+    e.g. ``{"allOf": [{"$ref": "#/Base"}], "properties": {...}}``) — into one
+    representative object. ``oneOf``/``anyOf`` pick the first listed variant
+    as the one representative shape: this module produces one plausible
+    request body per operation to fuzz, not every schema-valid alternative.
     """
     if _depth > _MAX_SCHEMA_DEPTH or not isinstance(schema, dict):
         return None
@@ -224,6 +257,43 @@ def _synthesize_example(schema: Any, doc: Dict[str, Any], _depth: int = 0) -> An
     if isinstance(enum, list) and enum:
         return enum[0]
 
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list) and all_of:
+        return _merge_all_of(schema, all_of, doc, _depth)
+
+    for composition_key in ("oneOf", "anyOf"):
+        variants = schema.get(composition_key)
+        if isinstance(variants, list) and variants:
+            return _synthesize_example(variants[0], doc, _depth + 1)
+
+    return _synthesize_by_type(schema, doc, _depth)
+
+
+def _merge_all_of(
+    schema: Dict[str, Any], all_of: List[Any], doc: Dict[str, Any], _depth: int
+) -> Any:
+    """Shallow-merge every ``allOf`` subschema's synthesized object (later
+    entries win on key conflicts). Falls back to the first subschema's own
+    value when nothing here actually synthesizes to an object."""
+    merged: Dict[str, Any] = {}
+    saw_object = False
+    for sub in all_of:
+        value = _synthesize_example(sub, doc, _depth + 1)
+        if isinstance(value, dict):
+            merged.update(value)
+            saw_object = True
+    own = _synthesize_by_type(schema, doc, _depth)
+    if isinstance(own, dict):
+        merged.update(own)
+        saw_object = True
+    if saw_object:
+        return merged
+    return _synthesize_example(all_of[0], doc, _depth + 1)
+
+
+def _synthesize_by_type(schema: Dict[str, Any], doc: Dict[str, Any], _depth: int) -> Any:
+    """The type-appropriate placeholder/property-walk, once example/default/
+    enum/allOf/oneOf/anyOf have already been handled by the caller."""
     schema_type = schema.get("type")
     if schema_type == "object" or "properties" in schema:
         properties = schema.get("properties", {})
