@@ -87,6 +87,46 @@ def _make_handler(offscope_url: str):
                 # possibly still sleeping past test teardown is negligible).
                 time.sleep(5)
                 return
+            if path == "/whoami":
+                # Echoes the request's own Cookie/Authorization headers into
+                # a link, so a test can prove what the *browser* actually
+                # sent without needing a session store on this fake server.
+                from urllib.parse import quote
+
+                cookie = quote(self.headers.get("Cookie", "none"))
+                auth = quote(self.headers.get("Authorization", "none"))
+                body = (
+                    f'<!DOCTYPE html><html><body>'
+                    f'<a href="/confirmed?cookie={cookie}&auth={auth}">go</a>'
+                    f"</body></html>"
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body.encode())
+                return
+            if path == "/basic":
+                # Real HTTP Basic: challenge first, same as a real server —
+                # Playwright's http_credentials only responds once challenged.
+                from urllib.parse import quote
+
+                auth = self.headers.get("Authorization")
+                if not auth:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="test"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = (
+                    f'<!DOCTYPE html><html><body>'
+                    f'<a href="/confirmed?auth={quote(auth)}">go</a>'
+                    f"</body></html>"
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body.encode())
+                return
             body = _PAGES.get(path, "<html><body>404</body></html>")
             body = body.replace("__OFFSCOPE__", offscope_url)
             self.send_response(200)
@@ -180,6 +220,58 @@ class TestDomWatcherCrawl:
         result = DomWatcher(max_depth=2).crawl(spa_server, scope_guard=guard)
         # Seed itself is always rendered once; its children are all filtered.
         assert len(result.endpoints) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Authenticated crawling — cookies/headers/HTTP-Basic carried into the
+# browser context (IMPROVEMENTS.md's DomWatcher cookie-jar follow-up)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDomWatcherAuthenticatedContext:
+    _TIMEOUT_MS = 2000
+
+    def test_cookies_and_headers_reach_the_browser(self, spa_server):
+        from urllib.parse import urlsplit
+
+        import requests
+
+        jar = requests.cookies.RequestsCookieJar()
+        jar.set("session", "secret123", domain=urlsplit(spa_server).hostname, path="/")
+
+        result = DomWatcher(max_depth=0, nav_timeout_ms=self._TIMEOUT_MS).crawl(
+            spa_server + "whoami",
+            cookies=jar,
+            extra_headers={"Authorization": "Bearer tok-abc"},
+        )
+        endpoint = next(ep for ep in result.endpoints if ep.url.endswith("/whoami"))
+        assert len(endpoint.links) == 1
+        confirmed_url = endpoint.links[0].url
+        assert "session%3Dsecret123" in confirmed_url
+        assert "Bearer%20tok-abc" in confirmed_url
+
+    def test_without_cookies_or_headers_server_sees_none(self, spa_server):
+        result = DomWatcher(max_depth=0, nav_timeout_ms=self._TIMEOUT_MS).crawl(
+            spa_server + "whoami"
+        )
+        endpoint = next(ep for ep in result.endpoints if ep.url.endswith("/whoami"))
+        confirmed_url = endpoint.links[0].url
+        assert "cookie=none" in confirmed_url
+        assert "auth=none" in confirmed_url
+
+    def test_http_credentials_are_sent_as_basic_auth(self, spa_server):
+        result = DomWatcher(max_depth=0, nav_timeout_ms=self._TIMEOUT_MS).crawl(
+            spa_server + "basic",
+            http_credentials={"username": "alice", "password": "wonderland"},
+        )
+        endpoint = next(ep for ep in result.endpoints if ep.url.endswith("/basic"))
+        confirmed_url = endpoint.links[0].url
+        # "alice:wonderland" base64-encoded, URL-quoted by the fixture server.
+        import base64
+        from urllib.parse import quote
+
+        expected = quote(f"Basic {base64.b64encode(b'alice:wonderland').decode()}")
+        assert expected in confirmed_url
 
 
 # ─────────────────────────────────────────────────────────────────────────────

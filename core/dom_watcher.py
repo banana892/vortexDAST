@@ -43,17 +43,27 @@ thread-safe the way the static crawler's worker pool needs, and JS
 rendering is the expensive, blocking step regardless; upgrade to multiple
 browser contexts if dynamic crawls of large sites become a bottleneck.
 
-shortcut: unauthenticated only — this does not carry over the scan's cookie
-jar/auth headers into the browser context. Combining dynamic rendering with
-an authenticated session is its own Phase D follow-up (IMPROVEMENTS.md §4),
-not done here.
+Authenticated crawling
+-----------------------
+``crawl()`` accepts the scan's ``cookies`` (a ``requests`` cookie jar),
+``extra_headers`` (e.g. an OAuth2 bearer token or an operator-supplied
+``--header``) and ``http_credentials`` (HTTP Basic), so a form-login/OAuth2/
+Basic-auth session carries into the rendered browser context instead of
+every page rendering logged out. ``scanner.py`` passes these through from
+the same authenticated ``Requester`` used for the static crawl.
+
+shortcut: a cookie with no explicit ``Domain`` attribute falls back to the
+seed URL's host — correct for the common single-host scan, but a cookie
+scoped to a different host reached via a redirect during login would be
+mis-attributed; upgrade if that case matters in practice.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlsplit
 
 from .crawler import CapturedJsonRequest, CrawledEndpoint, CrawlResult, Crawler, ScopeGuard
 from .parser import HTMLParser, ParsedPage
@@ -96,7 +106,14 @@ class DomWatcher:
         self.capture_json = capture_json
         self.max_captured_json = max_captured_json
 
-    def crawl(self, seed_url: str, scope_guard: Optional[ScopeGuard] = None) -> CrawlResult:
+    def crawl(
+        self,
+        seed_url: str,
+        scope_guard: Optional[ScopeGuard] = None,
+        cookies: Optional[Any] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+        http_credentials: Optional[Dict[str, str]] = None,
+    ) -> CrawlResult:
         """
         BFS-crawl ``seed_url`` with JavaScript rendered, same depth/scope
         semantics as :meth:`Crawler.crawl`. Never raises: a missing
@@ -104,6 +121,11 @@ class DomWatcher:
         navigation error degrades to as much of a result as was gathered
         (possibly empty) with a logged warning — a scan must not fail just
         because the dynamic pass couldn't run.
+
+        ``cookies`` (a ``requests`` cookie jar), ``extra_headers`` and
+        ``http_credentials`` (``{"username": ..., "password": ...}`` for
+        HTTP Basic) carry the scan's authenticated session into the browser
+        context — see the module docstring's "Authenticated crawling".
         """
         result = CrawlResult(seed_url=seed_url)
         self._captured_json: List[CapturedJsonRequest] = []
@@ -137,7 +159,18 @@ class DomWatcher:
                     return result
 
                 try:
-                    page = browser.new_page()
+                    context_kwargs: Dict[str, Any] = {}
+                    if extra_headers:
+                        context_kwargs["extra_http_headers"] = dict(extra_headers)
+                    if http_credentials:
+                        context_kwargs["http_credentials"] = http_credentials
+                    context = browser.new_context(**context_kwargs)
+                    if cookies:
+                        pw_cookies = self._to_playwright_cookies(cookies, seed_url)
+                        if pw_cookies:
+                            context.add_cookies(pw_cookies)  # type: ignore[arg-type]
+
+                    page = context.new_page()
                     page.set_default_navigation_timeout(self.nav_timeout_ms)
                     if self.capture_json:
                         page.on("request", self._on_request)
@@ -191,6 +224,27 @@ class DomWatcher:
             seed_url, len(result.endpoints), len(result.failed_urls),
         )
         return result
+
+    @staticmethod
+    def _to_playwright_cookies(cookies: Any, seed_url: str) -> List[Dict[str, Any]]:
+        """
+        Convert a ``requests`` cookie jar into the list-of-dicts shape
+        Playwright's ``BrowserContext.add_cookies()`` expects.
+        """
+        fallback_domain = urlsplit(seed_url).hostname or ""
+        out: List[Dict[str, Any]] = []
+        for cookie in cookies:
+            domain = getattr(cookie, "domain", "") or fallback_domain
+            if not domain or not getattr(cookie, "name", None):
+                continue
+            out.append({
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": domain,
+                "path": getattr(cookie, "path", "/") or "/",
+                "secure": bool(getattr(cookie, "secure", False)),
+            })
+        return out
 
     def _on_request(self, request: Any) -> None:
         """

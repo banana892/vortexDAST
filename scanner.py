@@ -1864,9 +1864,23 @@ def run_scan(args: argparse.Namespace) -> int:
             json_fuzz_enabled = (
                 not args.no_json_fuzz and bool(crawler_cfg.get("json_fuzz", True))
             )
+            # Carry the authenticated session (form-login/OAuth2 cookies +
+            # bearer/custom headers + HTTP Basic) into the rendered browser
+            # context — otherwise every dynamic page renders logged out.
+            dynamic_headers: Dict[str, str] = dict(auth_headers)
+            if "Authorization" in requester.session.headers:
+                dynamic_headers["Authorization"] = str(requester.session.headers["Authorization"])
             dynamic_result = DomWatcher(
                 max_depth=max_depth, capture_json=json_fuzz_enabled
-            ).crawl(args.target, scope_guard=scope_guard)
+            ).crawl(
+                args.target,
+                scope_guard=scope_guard,
+                cookies=requester.session.cookies,
+                extra_headers=dynamic_headers or None,
+                http_credentials=(
+                    {"username": http_auth[0], "password": http_auth[1]} if http_auth else None
+                ),
+            )
 
             existing_urls = crawl_result.all_urls
             new_endpoints = [

@@ -207,10 +207,26 @@ own quality:
   found untouched. Verified against a fake SPA whose links/forms exist only
   after an inline `<script>` runs (0 found statically, fully discovered
   dynamically). Sequential (one browser, no concurrency — Playwright's sync
-  API isn't thread-safe the way the static crawler's pool needs) and
-  unauthenticated (doesn't carry the scan's cookie jar into the browser
-  context yet — that's the authenticated-scanning follow-up below, not
-  done here).
+  API isn't thread-safe the way the static crawler's pool needs).
+  **Authenticated crawling — ✅ shipped:** `crawl()` now accepts `cookies`
+  (a `requests` cookie jar), `extra_headers` (bearer token / operator
+  `--header`s) and `http_credentials` (HTTP Basic), building an explicit
+  Playwright `BrowserContext` (`extra_http_headers`, `add_cookies()`,
+  `http_credentials`) instead of the bare default context — so a
+  form-login/OAuth2/Basic-auth session now renders authenticated pages
+  during `--dynamic` instead of every page rendering logged out.
+  `scanner.py` passes these straight from the same authenticated
+  `Requester` already used for the static crawl: `requester.session.cookies`,
+  any `Authorization` header `requester.session.headers` carries (OAuth2
+  bearer or an operator `--header`) plus the raw `--header` flags, and
+  `http_auth` as `http_credentials`. Verified against a real headless
+  Chromium run (`tests/test_dom_watcher.py`): a fixture page that echoes
+  the request's own `Cookie`/`Authorization` headers back into a link
+  confirms the browser actually sent them, and a separate HTTP Basic
+  challenge-response page confirms `http_credentials`. **Known limit:** a
+  cookie with no explicit `Domain` attribute falls back to the seed URL's
+  host — correct for the common single-host scan, but wrong for a cookie
+  scoped to a different host reached via a redirect during login.
 - **API testing** — ✅ *all three sub-items shipped.* Until now nothing in the crawl/parse pipeline carried a JSON body, a content-type,
   or a REST path-param concept: `CrawledEndpoint` (`core/crawler.py`) had
   only `forms`/`links`/`query_params`, and `ParsedForm` (`core/parser.py`)
@@ -782,6 +798,18 @@ Ordered by impact; several are now *resolved by the plan above*.
   HTTP-date) rather than only gating on presence, and an explicit value
   overrides the blind-doubling ceiling (capped at 30s). Last open item under
   "Operational / safety."
+- 2026-10-14 — `DomWatcher` authenticated-crawling shipped, closing its
+  "unauthenticated only" shortcut: `crawl()` now accepts `cookies`,
+  `extra_headers` and `http_credentials`, which build an explicit Playwright
+  `BrowserContext` (`extra_http_headers`, `add_cookies()`, `http_credentials`)
+  instead of the bare default one. `scanner.py` wires these from the same
+  authenticated `Requester` used for the static crawl, so `--dynamic` now
+  renders behind a form-login/OAuth2/Basic-auth session instead of every
+  page coming back logged out. Verified against a real headless Chromium
+  run: a fixture page that echoes its own request headers back into a link
+  proves the browser actually sent the cookie/bearer token, and a separate
+  HTTP Basic challenge-response page proves `http_credentials`. `DomWatcher`
+  being single-threaded remains the one open shortcut on this module.
 - 2026-10-14 — §5 item 6 "shallow detectors" closed, the last open item in
   that section: `traversal_check` gained POST-form coverage (a new shared
   `_probe_param` helper backs both the existing GET path and a new POST
