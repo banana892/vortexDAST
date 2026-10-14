@@ -206,8 +206,23 @@ own quality:
   static pass could never have seen, leaving everything static already
   found untouched. Verified against a fake SPA whose links/forms exist only
   after an inline `<script>` runs (0 found statically, fully discovered
-  dynamically). Sequential (one browser, no concurrency — Playwright's sync
-  API isn't thread-safe the way the static crawler's pool needs).
+  dynamically).
+  **Concurrency — ✅ shipped:** `max_workers` (CLI `--dynamic-workers`,
+  default 1 — unchanged single-page behaviour) renders multiple pages at
+  once. Playwright's sync API ties a connection's browser/context/page to
+  the thread that created them, so this isn't the static crawler's "shared
+  pool, any worker takes any URL" model — each worker thread owns its own
+  full Playwright connection/browser/page for its whole lifetime, pulling
+  `(url, depth)` pairs off one shared queue, reusing `core/crawler.py`'s
+  `_CrawlState` unchanged for the lock-protected result/visited/cap
+  bookkeeping. A worker whose own browser never launches (or crashes
+  outright) drains its share of the queue as failed instead of silently
+  stalling the others' shutdown — `work_q.join()` always completes even if
+  every worker's launch fails. Verified against a real local server (same
+  endpoint set discovered at `max_workers=1` and `4`; four ~1s pages render
+  measurably faster concurrently than sequentially; every worker's launch
+  forced to fail via a monkeypatched `BrowserType.launch` still returns
+  promptly instead of hanging).
   **Authenticated crawling — ✅ shipped:** `crawl()` now accepts `cookies`
   (a `requests` cookie jar), `extra_headers` (bearer token / operator
   `--header`s) and `http_credentials` (HTTP Basic), building an explicit
@@ -891,3 +906,18 @@ Ordered by impact; several are now *resolved by the plan above*.
   resource the other is correctly rejected from) and with a dedicated test
   proving two simultaneously valid `OAuth2Authenticator` sessions share no
   state. Closes "Authenticated scanning" completely — no open items remain.
+- 2026-10-15 — `DomWatcher` concurrency shipped (`--dynamic-workers`),
+  closing its "single-threaded" shortcut: each worker thread owns its own
+  full Playwright connection/browser/page for its whole lifetime (sync-API
+  resources are tied to the thread that created them, so they can't be
+  shared the way the static crawler's pool shares one HTTP session), pulling
+  work off one shared queue; `core/crawler.py`'s `_CrawlState` is reused
+  unchanged for the lock-protected result/visited/cap bookkeeping. A worker
+  whose browser never launches drains its share of the queue as failed
+  rather than hanging the others' `work_q.join()`. Default `max_workers=1`
+  keeps the original single-page behaviour unchanged; CLI opt-in via
+  `--dynamic-workers N`. Verified against a real local server: identical
+  endpoint set discovered at `max_workers=1` vs. `4`, a measurable wall-clock
+  speedup rendering four ~1s pages concurrently, and every worker's launch
+  forced to fail (monkeypatched `BrowserType.launch`) still returns promptly
+  instead of hanging.

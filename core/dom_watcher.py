@@ -27,8 +27,17 @@ Design
   docstring): run after it, keep everything the static pass already found,
   and merge in only the endpoints the static pass could never have seen
   (scanner.py does this merge).
-* One browser, one page, navigated sequentially (BFS, same depth semantics
-  as :class:`~core.crawler.Crawler`).
+* BFS, same depth semantics as :class:`~core.crawler.Crawler`. ``max_workers``
+  (default ``1``, matching the original single-page behaviour) controls how
+  many pages render concurrently. Playwright's sync API ties a connection's
+  browser/context/page to the thread that created them, so this isn't the
+  static crawler's "share one pool, dispatch any URL to any worker" model —
+  each worker thread owns its **own** full Playwright connection, browser and
+  page for its whole lifetime, pulling ``(url, depth)`` pairs off one shared
+  queue (``core.crawler._CrawlState`` for the lock-protected result/visited/
+  cap bookkeeping, reused unchanged from the static crawler). Set
+  ``max_workers`` above 1 only once a scan's dynamic-crawl phase is actually
+  the bottleneck — each worker is a whole headless Chromium process.
 * Also passively captures JSON ``fetch``/XHR calls the rendered page's own
   JS makes (``Content-Type: application/json``, ``POST``/``PUT``/``PATCH``)
   — the one piece of real API traffic the static crawler can never observe.
@@ -37,11 +46,6 @@ Design
   ``json_requests``, merged in by ``scanner.py`` the same way as any other
   dynamically-discovered endpoint. ``capture_json=False`` (or CLI
   ``--no-json-fuzz``) disables it.
-
-shortcut: single page, no concurrency — Playwright's sync API isn't
-thread-safe the way the static crawler's worker pool needs, and JS
-rendering is the expensive, blocking step regardless; upgrade to multiple
-browser contexts if dynamic crawls of large sites become a bottleneck.
 
 Authenticated crawling
 -----------------------
@@ -62,10 +66,19 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import threading
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
-from .crawler import CapturedJsonRequest, CrawledEndpoint, CrawlResult, Crawler, ScopeGuard
+from .crawler import (
+    CapturedJsonRequest,
+    CrawledEndpoint,
+    Crawler,
+    CrawlResult,
+    ScopeGuard,
+    _CrawlState,
+)
 from .parser import HTMLParser, ParsedPage
 
 logger = logging.getLogger(__name__)
@@ -97,6 +110,7 @@ class DomWatcher:
         parser: Optional[HTMLParser] = None,
         capture_json: bool = True,
         max_captured_json: int = DEFAULT_MAX_CAPTURED_JSON,
+        max_workers: int = 1,
     ) -> None:
         self.max_depth = max_depth
         self.max_pages = max_pages
@@ -105,6 +119,7 @@ class DomWatcher:
         self.parser = parser or HTMLParser()
         self.capture_json = capture_json
         self.max_captured_json = max_captured_json
+        self.max_workers = max(1, max_workers)
 
     def crawl(
         self,
@@ -130,10 +145,11 @@ class DomWatcher:
         result = CrawlResult(seed_url=seed_url)
         self._captured_json: List[CapturedJsonRequest] = []
         self._captured_json_keys: Set[Tuple[str, str]] = set()
+        self._capture_lock = threading.Lock()
 
         try:
-            from playwright.sync_api import Error as PlaywrightError
-            from playwright.sync_api import sync_playwright
+            import playwright.sync_api  # noqa: F401 — see docstring: each worker
+            # imports sync_playwright itself, so this is only an availability probe.
         except ImportError:
             logger.warning(
                 "playwright is not installed — dynamic crawl skipped. "
@@ -143,52 +159,28 @@ class DomWatcher:
 
         guard = scope_guard or ScopeGuard.from_seed(seed_url)
         seed = Crawler._normalise_url(seed_url)
-        visited = {seed}
-        frontier: List[Tuple[str, int]] = [(seed, 0)]
+        state = _CrawlState(result=result, visited={seed}, max_endpoints=self.max_pages)
 
-        try:
-            with sync_playwright() as pw:
-                try:
-                    browser = pw.chromium.launch(headless=True)
-                except PlaywrightError as exc:
-                    logger.warning(
-                        "Could not launch headless Chromium (%s) — is it installed? "
-                        "Run: playwright install chromium",
-                        exc,
-                    )
-                    return result
+        work_q: "queue.Queue[Optional[Tuple[str, int]]]" = queue.Queue()
+        work_q.put((seed, 0))
 
-                try:
-                    context_kwargs: Dict[str, Any] = {}
-                    if extra_headers:
-                        context_kwargs["extra_http_headers"] = dict(extra_headers)
-                    if http_credentials:
-                        context_kwargs["http_credentials"] = http_credentials
-                    context = browser.new_context(**context_kwargs)
-                    if cookies:
-                        pw_cookies = self._to_playwright_cookies(cookies, seed_url)
-                        if pw_cookies:
-                            context.add_cookies(pw_cookies)  # type: ignore[arg-type]
+        workers = [
+            threading.Thread(
+                target=self._worker_loop,
+                args=(work_q, state, guard, seed_url, cookies, extra_headers, http_credentials),
+                name=f"vdast-dom-watcher-{i}",
+                daemon=True,
+            )
+            for i in range(self.max_workers)
+        ]
+        for w in workers:
+            w.start()
 
-                    page = context.new_page()
-                    page.set_default_navigation_timeout(self.nav_timeout_ms)
-                    if self.capture_json:
-                        page.on("request", self._on_request)
-
-                    while frontier and len(result.endpoints) < self.max_pages:
-                        url, depth = frontier.pop(0)
-                        children = self._render_one(page, url, depth, result)
-                        for child_url, child_depth in children:
-                            if child_depth > self.max_depth or child_url in visited:
-                                continue
-                            if not guard.is_in_scope(child_url):
-                                continue
-                            visited.add(child_url)
-                            frontier.append((child_url, child_depth))
-                finally:
-                    browser.close()
-        except Exception as exc:  # noqa: BLE001 — a crashed browser must not sink the scan
-            logger.error("Dynamic crawl aborted: %s", exc)
+        work_q.join()
+        for _ in workers:
+            work_q.put(None)
+        for w in workers:
+            w.join()
 
         if self._captured_json:
             # Each captured call becomes its own synthetic endpoint (no
@@ -251,10 +243,13 @@ class DomWatcher:
         Record a same-page JSON ``fetch``/XHR call. Never raises: a
         malformed or unreadable request is simply skipped, since this runs
         on Playwright's event thread and an exception here must not be able
-        to take the browser down mid-crawl.
+        to take the browser down mid-crawl. With ``max_workers`` > 1, each
+        worker's own page fires this concurrently, so every access to the
+        shared capture state goes through ``self._capture_lock``.
         """
-        if len(self._captured_json) >= self.max_captured_json:
-            return
+        with self._capture_lock:
+            if len(self._captured_json) >= self.max_captured_json:
+                return
         try:
             method = request.method
             if method not in ("POST", "PUT", "PATCH"):
@@ -270,26 +265,33 @@ class DomWatcher:
             return
 
         key = (method, request.url)
-        if key in self._captured_json_keys:
-            return
-        self._captured_json_keys.add(key)
-        self._captured_json.append(
-            CapturedJsonRequest(
-                url=request.url, method=method, body=body, headers=dict(request.headers)
+        with self._capture_lock:
+            if key in self._captured_json_keys:
+                return
+            self._captured_json_keys.add(key)
+            self._captured_json.append(
+                CapturedJsonRequest(
+                    url=request.url, method=method, body=body, headers=dict(request.headers)
+                )
             )
-        )
 
     # ── Internal ─────────────────────────────────────────────────────────
 
     def _render_one(
-        self, page: Any, url: str, depth: int, result: CrawlResult
+        self, page: Any, url: str, depth: int, state: _CrawlState
     ) -> List[Tuple[str, int]]:
-        """Navigate to ``url``, record a CrawledEndpoint, return in-depth child URLs."""
+        """
+        Navigate to ``url``, record a CrawledEndpoint, return in-depth child
+        URLs. ``page`` is this worker thread's own — never touched by another
+        thread — so only the final write into the shared ``state`` needs its
+        lock.
+        """
         try:
             response = page.goto(url, wait_until="networkidle")
         except Exception as exc:  # noqa: BLE001 — timeouts/nav errors are per-page, not fatal
             logger.debug("Dynamic navigation failed for %s: %s", url, exc)
-            result.failed_urls[url] = str(exc)
+            with state._lock:
+                state.result.failed_urls[url] = str(exc)
             return []
 
         page.wait_for_timeout(self.settle_ms)
@@ -298,7 +300,8 @@ class DomWatcher:
             html = page.content()
         except Exception as exc:  # noqa: BLE001
             logger.debug("Could not read rendered DOM for %s: %s", url, exc)
-            result.failed_urls[url] = str(exc)
+            with state._lock:
+                state.result.failed_urls[url] = str(exc)
             return []
 
         try:
@@ -319,7 +322,8 @@ class DomWatcher:
             query_params=HTMLParser.extract_query_params(url),
             response_headers=headers,
         )
-        result.endpoints.append(endpoint)
+        with state._lock:
+            state.result.endpoints.append(endpoint)
         logger.info(
             "  ✓ [dynamic] %s [HTTP %d] | forms=%d links=%d",
             url, status_code, len(parsed.forms), len(parsed.links),
@@ -330,3 +334,104 @@ class DomWatcher:
             (Crawler._normalise_url(link.url), child_depth)
             for link in parsed.links
         ]
+
+    def _worker_loop(
+        self,
+        work_q: "queue.Queue[Optional[Tuple[str, int]]]",
+        state: _CrawlState,
+        guard: ScopeGuard,
+        seed_url: str,
+        cookies: Optional[Any],
+        extra_headers: Optional[Dict[str, str]],
+        http_credentials: Optional[Dict[str, str]],
+    ) -> None:
+        """
+        One worker's full lifecycle: its own Playwright connection, browser,
+        context and page — Playwright's sync API ties a connection's
+        resources to the thread that created them, so nothing here can be
+        shared with another worker — pulling ``(url, depth)`` pairs off the
+        shared queue until the ``None`` sentinel. Never raises: a browser that
+        fails to launch (or crashes outright) falls back to draining this
+        worker's share of the queue as failed rather than hanging the other
+        workers' ``work_q.join()`` forever.
+        """
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import sync_playwright
+
+        try:
+            with sync_playwright() as pw:
+                try:
+                    browser = pw.chromium.launch(headless=True)
+                except PlaywrightError as exc:
+                    logger.warning(
+                        "Could not launch headless Chromium (%s) — is it installed? "
+                        "Run: playwright install chromium",
+                        exc,
+                    )
+                    self._drain(work_q, state, guard, page=None)
+                    return
+                try:
+                    context_kwargs: Dict[str, Any] = {}
+                    if extra_headers:
+                        context_kwargs["extra_http_headers"] = dict(extra_headers)
+                    if http_credentials:
+                        context_kwargs["http_credentials"] = http_credentials
+                    context = browser.new_context(**context_kwargs)
+                    if cookies:
+                        pw_cookies = self._to_playwright_cookies(cookies, seed_url)
+                        if pw_cookies:
+                            context.add_cookies(pw_cookies)  # type: ignore[arg-type]
+
+                    page = context.new_page()
+                    page.set_default_navigation_timeout(self.nav_timeout_ms)
+                    if self.capture_json:
+                        page.on("request", self._on_request)
+
+                    self._drain(work_q, state, guard, page)
+                finally:
+                    browser.close()
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            logger.error("Dynamic crawl worker aborted: %s", exc)
+            self._drain(work_q, state, guard, page=None)
+
+    def _drain(
+        self,
+        work_q: "queue.Queue[Optional[Tuple[str, int]]]",
+        state: _CrawlState,
+        guard: ScopeGuard,
+        page: Any,
+    ) -> None:
+        """
+        Pull ``(url, depth)`` pairs off ``work_q`` until the ``None``
+        sentinel, enqueueing in-scope children as they're discovered. With
+        ``page=None`` (this worker never got a browser), every item is
+        recorded as failed instead of rendered — the item still gets
+        ``task_done()``'d either way, so ``work_q.join()`` always completes
+        even if every worker's browser launch fails.
+        """
+        while True:
+            item = work_q.get()
+            try:
+                if item is None:
+                    return
+                url, depth = item
+                with state._lock:
+                    if state.cap_reached():
+                        continue
+                if page is None:
+                    with state._lock:
+                        state.result.failed_urls[url] = "no browser available in this worker"
+                    continue
+                children = self._render_one(page, url, depth, state)
+                for child_url, child_depth in children:
+                    with state._lock:
+                        if child_depth > self.max_depth or child_url in state.visited:
+                            continue
+                        if not guard.is_in_scope(child_url):
+                            continue
+                        if state.cap_reached():
+                            continue
+                        state.visited.add(child_url)
+                    work_q.put((child_url, child_depth))
+            finally:
+                work_q.task_done()

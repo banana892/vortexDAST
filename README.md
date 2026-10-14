@@ -166,6 +166,14 @@ plain HTTP GET):
 vortex -u https://app.local --dynamic
 ```
 
+`--dynamic-workers N` (default 1) renders up to `N` pages concurrently —
+each is a whole separate headless Chromium process, so raise it only once
+the dynamic-crawl phase is actually the bottleneck on a large SPA:
+
+```bash
+vortex -u https://app.local --dynamic --dynamic-workers 4
+```
+
 API testing (opt-in; import endpoints from a spec instead of/alongside
 crawling — every path is rebased onto `-u`'s target, request bodies are
 fuzzed the same way a captured `--dynamic` JSON request is):

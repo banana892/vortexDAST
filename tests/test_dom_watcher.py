@@ -320,3 +320,100 @@ class TestPlaywrightAbsent:
         result = DomWatcher().crawl("http://app.local/")
         assert result.endpoints == []
         assert result.seed_url == "http://app.local/"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# max_workers — concurrent dynamic crawling (each worker owns its own
+# Playwright connection/browser/page; see core/dom_watcher.py's docstring)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def slow_spa_server():
+    """
+    A seed page linking to four pages that each take ~1s to respond
+    server-side — long enough that rendering them concurrently vs.
+    sequentially produces a clearly measurable wall-clock difference, not a
+    noise-level one.
+    """
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    n_slow = 4
+    delay_s = 1.0
+    seed_body = "<html><body>" + "".join(
+        f'<a href="/slow{i}">slow{i}</a>' for i in range(n_slow)
+    ) + "</body></html>"
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            path = self.path.rstrip("/") or "/"
+            if path.startswith("/slow"):
+                time.sleep(delay_s)
+                body = "<html><body>done</body></html>"
+            else:
+                body = seed_body
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/"
+    finally:
+        server.shutdown()
+
+
+class TestDomWatcherConcurrency:
+    def test_max_workers_discovers_same_endpoints_as_sequential(self, spa_server):
+        sequential = DomWatcher(max_depth=2, nav_timeout_ms=2000, max_workers=1).crawl(spa_server)
+        concurrent = DomWatcher(max_depth=2, nav_timeout_ms=2000, max_workers=4).crawl(spa_server)
+        assert {ep.url for ep in concurrent.endpoints} == {ep.url for ep in sequential.endpoints}
+        assert set(concurrent.failed_urls) == set(sequential.failed_urls)
+
+    def test_max_workers_renders_pages_concurrently(self, slow_spa_server):
+        start = time.monotonic()
+        sequential = DomWatcher(max_depth=1, nav_timeout_ms=5000, max_workers=1).crawl(
+            slow_spa_server
+        )
+        sequential_elapsed = time.monotonic() - start
+        assert len(sequential.endpoints) == 5  # seed + 4 slow pages
+
+        start = time.monotonic()
+        concurrent = DomWatcher(max_depth=1, nav_timeout_ms=5000, max_workers=4).crawl(
+            slow_spa_server
+        )
+        concurrent_elapsed = time.monotonic() - start
+        assert len(concurrent.endpoints) == 5
+
+        # Four ~1s pages: sequential pays all four in series, concurrent pays
+        # them in parallel — a generous margin to stay robust under CI load
+        # while still proving real concurrency, not a noise-level gain.
+        assert concurrent_elapsed < sequential_elapsed * 0.65
+
+    def test_every_worker_failing_to_launch_does_not_hang(self, spa_server, monkeypatch):
+        from playwright.sync_api import Error as PlaywrightError
+
+        def _always_fail(self, **kwargs):
+            raise PlaywrightError("simulated launch failure")
+
+        monkeypatch.setattr("playwright.sync_api.BrowserType.launch", _always_fail)
+
+        outcome: dict = {}
+
+        def _run():
+            outcome["result"] = DomWatcher(max_depth=1, max_workers=3).crawl(spa_server)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=15)
+        assert not t.is_alive(), "crawl() hung instead of draining as failed"
+
+        result = outcome["result"]
+        assert result.endpoints == []
+        assert spa_server.rstrip("/") in result.failed_urls

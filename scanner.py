@@ -777,6 +777,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--dynamic-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Concurrent headless-Chromium workers for --dynamic crawling "
+            "(default: 1, matching the original single-page behaviour). Each "
+            "worker is a whole separate browser process, far heavier than an "
+            "HTTP thread — raise this only once the dynamic-crawl phase is "
+            "actually the scan's bottleneck."
+        ),
+    )
+    parser.add_argument(
         "--no-json-fuzz",
         action="store_true",
         default=False,
@@ -2046,7 +2059,13 @@ def run_scan(args: argparse.Namespace) -> int:
         # crawl already found is left exactly as it was.
         dynamic_enabled = args.dynamic or bool(crawler_cfg.get("dynamic_crawl", False))
         if dynamic_enabled:
-            ui.phase(console, theme, 2, "Dynamic crawl", f"Playwright, max depth {max_depth}")
+            worker_detail = (
+                f", {args.dynamic_workers} workers" if args.dynamic_workers > 1 else ""
+            )
+            ui.phase(
+                console, theme, 2, "Dynamic crawl",
+                f"Playwright, max depth {max_depth}{worker_detail}",
+            )
             scope_guard = ScopeGuard.from_seed(args.target, scope_cfg)
             json_fuzz_enabled = (
                 not args.no_json_fuzz and bool(crawler_cfg.get("json_fuzz", True))
@@ -2058,7 +2077,9 @@ def run_scan(args: argparse.Namespace) -> int:
             if "Authorization" in requester.session.headers:
                 dynamic_headers["Authorization"] = str(requester.session.headers["Authorization"])
             dynamic_result = DomWatcher(
-                max_depth=max_depth, capture_json=json_fuzz_enabled
+                max_depth=max_depth,
+                capture_json=json_fuzz_enabled,
+                max_workers=args.dynamic_workers,
             ).crawl(
                 args.target,
                 scope_guard=scope_guard,
