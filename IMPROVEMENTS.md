@@ -163,33 +163,44 @@ the seed URL — see Phase E's "full data-chaining," now shipped.
    reaches sqlmap only as an HTTP JSON value, never argv/shell, so there's no
    command-injection surface at all here. Requires `sqlmapapi` on `PATH`
    (bundled with sqlmap; a wrapper script is enough — see Contributing).
-5. **interactsh** — ✅ *shipped, now covering SSRF + RCE + SQLi + XXE —
-   §5 item 4's OAST gap fully closed.* `adapters/interactsh_adapter.py`
+5. **interactsh** — ✅ *shipped, now covering SSRF + RCE + SQLi + XXE across
+   the full probed surface (GET params, POST form fields, JSON body leaves)
+   — §5 item 4's OAST gap fully closed.* `adapters/interactsh_adapter.py`
    drives `interactsh-client`, asking it to generate one unique correlation
-   domain **per (query parameter, payload) combination** on the target
-   **plus one more, always, for a dedicated XXE probe** (`-n`), substitutes
-   each rendered payload into its one parameter (others untouched), waits
-   out a short grace period, then reads back any DNS/HTTP callback
-   (`-json -o`) and attributes it to the exact parameter *and*
-   vulnerability class that caused it. Five payload specs run per
-   parameter: a plain callback URL (blind SSRF), two OS command-injection
-   shapes (`; nslookup <domain> #` and `` `nslookup <domain>` ``,
-   confirming blind RCE), and two DBMS-specific blind-SQLi OOB payloads
-   (MSSQL `xp_dirtree`, Oracle `UTL_INADDR.get_host_address`) — for the one
-   seed URL each adapter currently gets. Total probes are capped
-   (`_MAX_PROBES`) alongside the existing per-parameter cap, since 5
-   payloads/param multiplies request volume. A target with no query
-   parameters skips the per-parameter probes entirely (nothing to
-   substitute into), but the client still starts — **blind XXE needs no
-   query parameter at all**: it's a dedicated `_send_xxe_probe` that POSTs
-   a crafted external-entity XML document (`_render_xxe_payload`, bare
+   domain **per (probe point, payload) combination** on the target **plus
+   one more, always, for a dedicated XXE probe** (`-n`), substitutes each
+   rendered payload into its one probe point (others untouched), waits out
+   a short grace period, then reads back any DNS/HTTP callback (`-json -o`)
+   and attributes it to the exact probe point *and* vulnerability class
+   that caused it. A probe point is a GET query parameter (parsed from the
+   target URL), or — when `ctx.extra["endpoints"]` (set by `scanner.py`)
+   carries a crawled `CrawledEndpoint` for that exact URL — a POST form
+   field or a JSON body leaf, the latter reusing `core/json_fuzz.py`'s
+   `fuzz_targets_for` verbatim (the same leaf-walker `sqli_check`/
+   `nosql_check`/`xss_check` already fuzz with), so this adapter needed no
+   new parsing logic for either. Five payload specs run per probe point: a
+   plain callback URL (blind SSRF), two OS command-injection shapes
+   (`; nslookup <domain> #` and `` `nslookup <domain>` ``, confirming blind
+   RCE), and two DBMS-specific blind-SQLi OOB payloads (MSSQL `xp_dirtree`,
+   Oracle `UTL_INADDR.get_host_address`) — for the one seed URL each
+   adapter currently gets (only form fields/JSON leaves *on that exact
+   URL*, not the whole crawl). Total probes are capped (`_MAX_PROBES`)
+   alongside the existing per-point cap (`_MAX_PROBE_POINTS`), since 5
+   payloads/point multiplies request volume. A target with no probe points
+   at all skips the substitution probes entirely (nothing to substitute
+   into), but the client still starts — **blind XXE needs no probe point at
+   all**: it's a dedicated `_send_xxe_probe` that POSTs a crafted
+   external-entity XML document (`_render_xxe_payload`, bare
    `application/xml`) straight to the target's own URL, confirmed by the
    same DNS/HTTP callback mechanism as everything else here, surfaced with
    a `<xml body>` placeholder in place of a parameter name since there
-   isn't one. **Known limit:** only a bare `application/xml` POST is
-   tried — not a SOAP envelope, not a multipart/XML part, and the target's
-   existing query parameters (if any) aren't re-sent alongside the body;
-   left for a follow-up if a real target's XML endpoint needs a different
+   isn't one. **Known limit:** a REST-style path segment isn't a probe
+   point (`core/json_fuzz.py`'s path-segment target only supports
+   *appending*, not the full-value replacement an OOB payload needs); and
+   the XXE probe only tries a bare `application/xml` POST — not a SOAP
+   envelope, not a multipart/XML part, and the target's existing query
+   parameters (if any) aren't re-sent alongside the body; left for a
+   follow-up if a real target's XML endpoint needs a different
    shape to parse the body at all.
 
 ### Phase D — Our own web-app depth (unique value, not outsourced)
@@ -538,11 +549,12 @@ Ordered by impact; several are now *resolved by the plan above*.
    both feed `sqli_check`/`nosql_check`/`xss_check`'s JSON-leaf and
    REST-path-segment fuzzing (`core/json_fuzz.py`).
 4. **No OAST** — ✅ *fully resolved by Phase C.* Blind SSRF/RCE/SQLi
-   (MSSQL/Oracle) confirmed via `interactsh`'s GET query-parameter
-   substitution; blind XXE confirmed via the same adapter's dedicated,
-   parameter-independent probe — a bare `application/xml` POST of a
-   crafted external-entity document straight to the target, since this
-   class genuinely needed a request body rather than a query-param
+   (MSSQL/Oracle) confirmed via `interactsh`'s substitution probes across
+   GET query parameters, POST form fields and JSON body leaves alike; blind
+   XXE confirmed via the same adapter's dedicated, parameter-independent
+   probe — a bare `application/xml` POST of a crafted external-entity
+   document straight to the target, since this class genuinely needed a
+   request body rather than a query-param
    substitution (`_send_xxe_probe`/`_render_xxe_payload`). Runs even
    against a target with no query parameters at all.
 5. **Missing vuln classes** — ✅ *native modules shipped for all four.*
@@ -953,3 +965,20 @@ Ordered by impact; several are now *resolved by the plan above*.
   constructed `http.cookiejar.Cookie` and an end-to-end real-Chromium +
   real-`requests` round-trip reproducing the exact `"localhost.local"`
   quirk.
+- 2026-10-15 — `interactsh` adapter extended beyond GET query parameters,
+  closing its "query-parameters-only" shortcut: `_ProbePoint` generalises
+  the OOB mechanism (one correlation domain per point × payload spec) over
+  three sources — a target URL's own query parameters (unchanged), POST
+  form fields, and JSON body leaves, the latter two read from
+  `ctx.extra["endpoints"]` (a new field `scanner.py` now always sets,
+  carrying the crawl's `CrawledEndpoint`s) when one matches the adapter's
+  exact target URL. JSON leaves reuse `core/json_fuzz.py`'s
+  `fuzz_targets_for`/`FuzzTarget.replace` verbatim — no new parsing logic.
+  `_MAX_PARAMS` renamed `_MAX_PROBE_POINTS` to match its now-broader scope.
+  Verified with new tests: POST form fields get probed (and findings
+  attributed to the right field), JSON body leaves get probed the same way,
+  and an endpoint for a *different* URL contributes nothing (only the
+  always-on XXE probe fires). **Known limit:** a REST-style path segment
+  still isn't a probe point — `core/json_fuzz.py`'s path-segment target
+  only supports appending to the segment, not the full-value replacement an
+  OOB payload needs.

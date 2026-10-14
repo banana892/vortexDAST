@@ -2286,6 +2286,11 @@ def run_scan(args: argparse.Namespace) -> int:
             ctx.extra["headers"] = auth_headers
             ctx.extra["cookie"] = args.cookie
             ctx.extra["ffuf_wordlist"] = getattr(args, "ffuf_wordlist", None)
+            # The crawled attack surface (forms, captured/imported JSON
+            # requests) for adapters that can test more than just a bare
+            # URL's own query parameters — currently interactsh, to also
+            # probe POST form fields and JSON body leaves at its one target.
+            ctx.extra["endpoints"] = endpoints
             # Data passing: seed any open ports a port scan already produced
             # *before* this loop (e.g. the built-in --port-scan module) so
             # httpx can probe them too. nmap's own findings, produced inside

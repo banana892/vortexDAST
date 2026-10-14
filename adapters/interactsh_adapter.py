@@ -30,36 +30,49 @@ Mechanism, generalised across the three *parameter-substitution* classes
 (SSRF/RCE/SQLi):
 
 1. Start ``interactsh-client``, asking it to generate one unique correlation
-   domain **per (query parameter, payload) combination** on the target,
-   **plus one more for the XXE probe** (``-n <count>``), and write them to a
-   local file (``-ps``/``-psf``) — so a later callback can be attributed
-   back to the exact parameter *and* vulnerability class that caused it.
-2. For each combination, issue one GET with that parameter's value replaced
-   by the corresponding payload rendered against its own domain (every other
-   parameter left untouched). Separately, issue one POST of the rendered
-   XXE document to the target itself — unrelated to any query parameter.
+   domain **per (probe point, payload) combination** on the target, **plus
+   one more for the XXE probe** (``-n <count>``), and write them to a local
+   file (``-ps``/``-psf``) — so a later callback can be attributed back to
+   the exact probe point *and* vulnerability class that caused it. A probe
+   point is a GET query parameter (parsed straight from ``target``'s own
+   URL), a POST form field, or a JSON body leaf — the latter two only when
+   ``ctx.extra["endpoints"]`` carries a crawled :class:`~core.crawler.CrawledEndpoint`
+   for ``target`` with forms/``json_requests`` on it (``scanner.py`` always
+   sets this). Form fields and JSON leaves reuse ``core/json_fuzz.py``'s
+   ``fuzz_targets_for`` — the exact same leaf-walk/path-segment machinery
+   ``sqli_check``/``nosql_check``/``xss_check`` already fuzz with — so this
+   adapter needs no parsing logic of its own for either.
+2. For each combination, issue one request with that probe point's value
+   *replaced outright* by the corresponding payload rendered against its own
+   domain (every other parameter/field/leaf left untouched): a GET for a
+   query parameter, a POST (form-encoded) for a form field, a POST (JSON)
+   for a body leaf. Separately, issue one POST of the rendered XXE document
+   to the target itself — unrelated to any probe point.
 3. Give the server a short grace period to make any outbound call, then read
    whatever interactions ``interactsh-client`` logged (``-json -o <file>``) —
    a DNS lookup alone already proves the server tried to resolve our domain;
    a completed HTTP request proves it went further.
 4. Map each distinct domain that fired into one Finding, attributed to its
-   parameter (or, for XXE, a ``<xml body>`` placeholder — there is no
+   probe point (or, for XXE, a ``<xml body>`` placeholder — there is no
    parameter) and vulnerability class, and tear the client down.
 
-The XXE probe always runs, even against a target with no query parameters
-at all (it needs none) — the client now starts for *every* target. The
-SSRF/RCE/SQLi parameter-substitution probes simply have nothing to
-contribute when there are no query parameters, so only the XXE domain gets
-requested and probed in that case.
+The XXE probe always runs, even against a target with no probe points at
+all (it needs none) — the client now starts for *every* target. The
+SSRF/RCE/SQLi substitution probes simply have nothing to contribute when
+there are none, so only the XXE domain gets requested and probed in that
+case.
 
-shortcut: only query parameters are probed for SSRF/RCE/SQLi (no POST
-body/form fields, no path segments); upgrade when the orchestrator passes
-adapters the full crawled attack surface instead of one seed URL (Phase E
-data-chaining). The XXE probe only tries a bare ``application/xml`` POST of
-the target's own URL — not a SOAP envelope, not a multipart/XML part, and
-not the URL's existing query parameters re-sent alongside the XML body;
-upgrade if a real target's XML endpoint needs a different shape to parse
-the body at all.
+shortcut: a REST-style path segment (e.g. the ``42`` in ``/users/42``) is
+not a probe point here, unlike the leaf-walker's other consumers — an OOB
+payload needs to *replace* the segment outright (the same way a query
+parameter or JSON leaf does), and ``core/json_fuzz.py``'s path-segment
+target only supports *appending* to it (meant for ID-swap/boundary-probe
+style fuzzing, not a full-value substitution); upgrade if a real target's
+object-reference path segment turns out to matter here. The XXE probe only
+tries a bare ``application/xml`` POST of the target's own URL — not a SOAP
+envelope, not a multipart/XML part, and not the URL's existing query
+parameters re-sent alongside the XML body; upgrade if a real target's XML
+endpoint needs a different shape to parse the body at all.
 
 Licence note
 ------------
@@ -90,7 +103,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
-from core.cvss import build_vector, calculate as cvss_calc
+from core.crawler import CrawledEndpoint
+from core.cvss import build_vector
+from core.cvss import calculate as cvss_calc
+from core.json_fuzz import fuzz_targets_for
 from core.orchestrator import ScanContext, ToolAdapter
 from modules.base import Confidence, Finding, Severity
 
@@ -132,6 +148,24 @@ class _ProbeSpec(NamedTuple):
 
     kind: str
     render: Callable[[str], str]
+
+
+class _ProbePoint(NamedTuple):
+    """
+    One place an OOB payload can be injected: a GET query parameter, a POST
+    form field, or a JSON body leaf. Generalised so the OOB mechanism (one
+    correlation domain per point × payload spec, attribute the callback back)
+    doesn't care which kind of point it's dealing with.
+    """
+
+    parameter: str
+    """Reported as ``Finding.parameter`` — the field/param name, or a JSON
+    leaf's ``body:...`` label from ``core.json_fuzz.render_path``."""
+
+    send: Callable[[str], None]
+    """Send one request with this point's value replaced by the given
+    (already-rendered) payload. Never raises — network errors are logged
+    and swallowed, same as every other probe send in this adapter."""
 
 
 #: Payload per vulnerability class, keyed by the domain interactsh-client
@@ -273,11 +307,12 @@ _VULN_META: Dict[str, Dict[str, Any]] = {
     ),
 }
 
-#: Hard cap on parameters probed per run — bounds request volume against the
-#: target and payload count against the (shared, public) interactsh pool.
-_MAX_PARAMS = 20
-#: Hard cap on total probes (params × payload specs) per run, for the same
-#: reason — with 5 specs, 20 params would mean 100 requests/domains.
+#: Hard cap on probe points (query params + form fields + JSON leaves)
+#: probed per run — bounds request volume against the target and payload
+#: count against the (shared, public) interactsh pool.
+_MAX_PROBE_POINTS = 20
+#: Hard cap on total probes (probe points × payload specs) per run, for the
+#: same reason — with 5 specs, 20 points would mean 100 requests/domains.
 _MAX_PROBES = 60
 #: How long interactsh-client gets to register and write its payload file.
 _STARTUP_TIMEOUT = 15.0
@@ -370,19 +405,20 @@ class InteractshAdapter(ToolAdapter):
             return self._fallback(target, ctx)
 
         self._target = target
-        params = self._extract_params(target)
-        # Bound total probes (params × payload specs) to _MAX_PROBES, then
-        # apply the per-param cap on whatever's left.
-        max_params_for_budget = max(1, _MAX_PROBES // len(_PROBE_SPECS))
-        params = params[: min(_MAX_PARAMS, max_params_for_budget)]
-        combos: List[Tuple[str, _ProbeSpec]] = [
-            (param, spec) for param in params for spec in _PROBE_SPECS
+        points = self._build_probe_points(target, ctx)
+        # Bound total probes (points × payload specs) to _MAX_PROBES, then
+        # apply the per-point cap on whatever's left.
+        max_points_for_budget = max(1, _MAX_PROBES // len(_PROBE_SPECS))
+        points = points[: min(_MAX_PROBE_POINTS, max_points_for_budget)]
+        combos: List[Tuple[_ProbePoint, _ProbeSpec]] = [
+            (point, spec) for point in points for spec in _PROBE_SPECS
         ]
-        # The XXE probe needs no query parameter at all, so it always runs —
-        # one extra domain slot, independent of `combos`.
+        # The XXE probe needs no probe point at all, so it always runs — one
+        # extra domain slot, independent of `combos`.
         if not combos:
             logger.info(
-                "interactsh: '%s' has no query parameters — only the XXE probe will run.",
+                "interactsh: '%s' has no query parameters/form fields/JSON "
+                "body leaves — only the XXE probe will run.",
                 target,
             )
 
@@ -409,10 +445,10 @@ class InteractshAdapter(ToolAdapter):
                     return []
 
                 self._domain_to_combo = {}
-                for (param, spec), domain in zip(combos, domains):
+                for (point, spec), domain in zip(combos, domains):
                     label = domain.split(".", 1)[0]
-                    self._domain_to_combo[label] = (param, spec.kind)
-                    self._send_probe(target, param, spec.render(domain))
+                    self._domain_to_combo[label] = (point.parameter, spec.kind)
+                    point.send(spec.render(domain))
 
                 xxe_domain = domains[len(combos)]
                 xxe_label = xxe_domain.split(".", 1)[0]
@@ -435,7 +471,22 @@ class InteractshAdapter(ToolAdapter):
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
-    # ── Internal helpers ─────────────────────────────────────────────────
+    # ── Probe-point discovery ────────────────────────────────────────────
+
+    @classmethod
+    def _build_probe_points(cls, target: str, ctx: ScanContext) -> List[_ProbePoint]:
+        """
+        Every place a probe can be injected at ``target``: its own GET query
+        parameters, plus — when the crawl found them — POST form fields and
+        JSON body leaves on that exact page.
+        """
+        points = cls._query_param_points(target)
+        for endpoint in ctx.extra.get("endpoints", None) or []:
+            if endpoint.url != target:
+                continue
+            points.extend(cls._form_field_points(endpoint))
+            points.extend(cls._json_body_points(endpoint))
+        return points
 
     @staticmethod
     def _extract_params(target: str) -> List[str]:
@@ -443,8 +494,62 @@ class InteractshAdapter(ToolAdapter):
         query = urlsplit(target).query
         return list(dict.fromkeys(name for name, _ in parse_qsl(query, keep_blank_values=True)))
 
+    @classmethod
+    def _query_param_points(cls, target: str) -> List[_ProbePoint]:
+        """One probe point per distinct query parameter on ``target``."""
+
+        def _make_send(param: str) -> Callable[[str], None]:
+            return lambda probe_value: cls._send_query_probe(target, param, probe_value)
+
+        return [
+            _ProbePoint(parameter=name, send=_make_send(name))
+            for name in cls._extract_params(target)
+        ]
+
+    @classmethod
+    def _form_field_points(cls, endpoint: CrawledEndpoint) -> List[_ProbePoint]:
+        """One point per field of every POST form rendered on this page."""
+        points: List[_ProbePoint] = []
+        for form in endpoint.forms:
+            if form.method != "POST" or not form.fields:
+                continue
+            base_body = {f.name: f.default_value for f in form.fields}
+
+            def _make_send(action_url: str, base: Dict[str, str], field: str) -> Callable[[str], None]:
+                return lambda probe_value: cls._send_form_probe(action_url, base, field, probe_value)
+
+            for target_field in form.fields:
+                points.append(
+                    _ProbePoint(
+                        parameter=target_field.name,
+                        send=_make_send(form.action_url, base_body, target_field.name),
+                    )
+                )
+        return points
+
+    @classmethod
+    def _json_body_points(cls, endpoint: CrawledEndpoint) -> List[_ProbePoint]:
+        """One point per scalar leaf of every JSON request captured on this page."""
+        points: List[_ProbePoint] = []
+        for captured in endpoint.json_requests:
+            for fuzz_target in fuzz_targets_for(captured):
+                if fuzz_target.kind != "body" or fuzz_target.replace is None:
+                    continue
+                replace = fuzz_target.replace  # the None check above narrows this for mypy
+
+                def _make_send(do_replace: Callable[[Any], Tuple[str, Any]]) -> Callable[[str], None]:
+                    def _send(probe_value: str) -> None:
+                        url, body = do_replace(probe_value)
+                        InteractshAdapter._send_json_probe(url, body)
+                    return _send
+
+                points.append(_ProbePoint(parameter=fuzz_target.label, send=_make_send(replace)))
+        return points
+
+    # ── Probe senders ─────────────────────────────────────────────────────
+
     @staticmethod
-    def _send_probe(target: str, param: str, probe_value: str) -> None:
+    def _send_query_probe(target: str, param: str, probe_value: str) -> None:
         """GET ``target`` with ``param`` set to ``probe_value``, other params untouched."""
         parts = urlsplit(target)
         pairs = parse_qsl(parts.query, keep_blank_values=True)
@@ -454,6 +559,26 @@ class InteractshAdapter(ToolAdapter):
             requests.get(probe_url, timeout=_PROBE_TIMEOUT)
         except requests.exceptions.RequestException as exc:
             logger.debug("interactsh probe request failed (ignored): %s", exc)
+
+    @staticmethod
+    def _send_form_probe(
+        action_url: str, base_body: Dict[str, str], field: str, probe_value: str
+    ) -> None:
+        """POST ``action_url`` with ``field`` set to ``probe_value``, other fields untouched."""
+        body = dict(base_body)
+        body[field] = probe_value
+        try:
+            requests.post(action_url, data=body, timeout=_PROBE_TIMEOUT)
+        except requests.exceptions.RequestException as exc:
+            logger.debug("interactsh form probe request failed (ignored): %s", exc)
+
+    @staticmethod
+    def _send_json_probe(url: str, json_body: Any) -> None:
+        """POST ``json_body`` (already has the probed leaf replaced) to ``url``."""
+        try:
+            requests.post(url, json=json_body, timeout=_PROBE_TIMEOUT)
+        except requests.exceptions.RequestException as exc:
+            logger.debug("interactsh JSON probe request failed (ignored): %s", exc)
 
     @staticmethod
     def _send_xxe_probe(target: str, xml_body: str) -> None:

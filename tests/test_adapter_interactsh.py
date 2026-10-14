@@ -278,3 +278,107 @@ class TestRun:
     def test_absent_binary_skips_cleanly(self, monkeypatch):
         monkeypatch.setattr(InteractshAdapter, "is_available", lambda self: False)
         assert InteractshAdapter().run("http://app.local/?a=1", ScanContext()) == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# run — probing beyond query parameters (ctx.extra["endpoints"]): POST form
+# fields and JSON body leaves, reusing core/json_fuzz.py like every other
+# module already fuzzing captured JSON requests.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRunWithCrawledEndpoint:
+    def test_probes_post_form_fields_too(self, fake_client_on_path, recording_target, monkeypatch):
+        from core.crawler import CrawledEndpoint
+        from core.parser import FormField, ParsedForm
+
+        monkeypatch.setattr("adapters.interactsh_adapter._SETTLE_SECONDS", 1.0)
+        base, seen, seen_posts = recording_target
+        target = f"{base}/"
+        endpoint = CrawledEndpoint(
+            url=target,
+            status_code=200,
+            depth=0,
+            forms=[
+                ParsedForm(
+                    action_url=target,
+                    method="POST",
+                    fields=[
+                        FormField(name="username", field_type="text", default_value="bob"),
+                        FormField(name="comment", field_type="text", default_value="hi"),
+                    ],
+                )
+            ],
+        )
+        ctx = ScanContext(tool_timeout=30, extra={"endpoints": [endpoint]})
+        findings = InteractshAdapter().run(target, ctx)
+
+        form_findings = [f for f in findings if f.parameter in ("username", "comment")]
+        assert len(form_findings) == 1  # only the fake client's one canned callback
+
+        # No query parameters at all, so no GET probes.
+        assert seen == []
+        # Two fields × 5 payload specs = 10 form-encoded POSTs, plus the one
+        # parameter-independent XXE POST (application/xml) — distinguishable
+        # by content type.
+        form_posts = [p for p in seen_posts if p["content_type"] != "application/xml"]
+        assert len(form_posts) == 10
+        assert any("username=http%3A%2F%2Ffakeid" in p["body"] for p in form_posts)
+        # The untouched field keeps its original value on every probe.
+        assert all("comment=hi" in p["body"] for p in form_posts if "username=http" in p["body"])
+
+    def test_probes_json_body_leaves_too(self, fake_client_on_path, recording_target, monkeypatch):
+        from core.crawler import CapturedJsonRequest, CrawledEndpoint
+
+        monkeypatch.setattr("adapters.interactsh_adapter._SETTLE_SECONDS", 1.0)
+        base, seen, seen_posts = recording_target
+        target = f"{base}/"
+        captured = CapturedJsonRequest(
+            url=f"{base}/api/widgets", method="POST", body={"name": "gadget", "qty": 3}
+        )
+        endpoint = CrawledEndpoint(
+            url=target, status_code=200, depth=0, json_requests=[captured]
+        )
+        ctx = ScanContext(tool_timeout=30, extra={"endpoints": [endpoint]})
+        findings = InteractshAdapter().run(target, ctx)
+
+        json_findings = [f for f in findings if f.parameter.startswith("body:")]
+        assert len(json_findings) == 1
+
+        assert seen == []
+        # Two scalar leaves (name, qty) × 5 specs = 10 JSON POSTs.
+        json_posts = [p for p in seen_posts if p["content_type"] == "application/json"]
+        assert len(json_posts) == 10
+        assert any("fakeid" in p["body"] for p in json_posts)
+
+    def test_mismatched_endpoint_url_contributes_nothing(
+        self, fake_client_on_path, recording_target, monkeypatch
+    ):
+        """An endpoint for a *different* URL must not leak its forms in here."""
+        from core.crawler import CrawledEndpoint
+        from core.parser import FormField, ParsedForm
+
+        monkeypatch.setattr("adapters.interactsh_adapter._SETTLE_SECONDS", 1.0)
+        base, seen, seen_posts = recording_target
+        target = f"{base}/"
+        other_endpoint = CrawledEndpoint(
+            url=f"{base}/other",
+            status_code=200,
+            depth=0,
+            forms=[
+                ParsedForm(
+                    action_url=f"{base}/other",
+                    method="POST",
+                    fields=[FormField(name="x", field_type="text", default_value="1")],
+                )
+            ],
+        )
+        ctx = ScanContext(tool_timeout=30, extra={"endpoints": [other_endpoint]})
+        findings = InteractshAdapter().run(target, ctx)
+
+        # Only the parameter-independent XXE probe should have run.
+        assert seen == []
+        assert len(seen_posts) == 1
+        assert seen_posts[0]["content_type"] == "application/xml"
+        assert len(findings) == 1
+        assert findings[0].extra["vuln_class"] == "xxe"
