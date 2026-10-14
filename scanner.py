@@ -1056,10 +1056,46 @@ def _build_parser() -> argparse.ArgumentParser:
             "Role-matrix testing: log in a *second*, independently "
             "authenticated session with these credentials (same "
             "'name=value&...' syntax as --login-data), reusing --login-url/"
-            "--login-method/--login-success-text/--login-failure-text. "
-            "access_control_check then diffs what each identity can reach to "
-            "surface vertical/horizontal broken access control. Requires "
-            "--login-url. Mutually exclusive with --role2-oauth2-*."
+            "--login-method/--login-success-text/--login-failure-text unless "
+            "overridden below. access_control_check then diffs what each "
+            "identity can reach to surface vertical/horizontal broken access "
+            "control. Requires --login-url. Mutually exclusive with "
+            "--role2-oauth2-*."
+        ),
+    )
+    parser.add_argument(
+        "--role2-login-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "Override --login-url for the role-matrix second identity, when "
+            "it logs in through a genuinely different endpoint (e.g. a "
+            "separate admin portal). Defaults to --login-url."
+        ),
+    )
+    parser.add_argument(
+        "--role2-login-method",
+        choices=["GET", "POST"],
+        default=None,
+        metavar="METHOD",
+        help="Override --login-method for --role2-login-url. Defaults to --login-method.",
+    )
+    parser.add_argument(
+        "--role2-login-success-text",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Override --login-success-text for the role-matrix second "
+            "identity's login response. Defaults to --login-success-text."
+        ),
+    )
+    parser.add_argument(
+        "--role2-login-failure-text",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Override --login-failure-text for the role-matrix second "
+            "identity's login response. Defaults to --login-failure-text."
         ),
     )
     parser.add_argument(
@@ -1909,18 +1945,23 @@ def run_scan(args: argparse.Namespace) -> int:
                 max_retries=int(req_cfg.get("max_retries", 3)),
                 max_workers=threads,
             )
+            role2_login_url = getattr(args, "role2_login_url", None) or args.login_url
             role_authenticator = FormLoginAuthenticator(
-                login_url=args.login_url,
+                login_url=role2_login_url,
                 credentials=role_credentials,
-                method=args.login_method,
-                success_text=args.login_success_text,
-                failure_text=args.login_failure_text,
+                method=getattr(args, "role2_login_method", None) or args.login_method,
+                success_text=(
+                    getattr(args, "role2_login_success_text", None) or args.login_success_text
+                ),
+                failure_text=(
+                    getattr(args, "role2_login_failure_text", None) or args.login_failure_text
+                ),
                 harvest_hidden_fields=not args.no_csrf_harvest,
             )
             if role_authenticator.login(role_requester):
                 ui.status(
                     console, theme, "ok", "Role-matrix identity authenticated",
-                    f"second session established via {args.login_url}",
+                    f"second session established via {role2_login_url}",
                 )
             else:
                 ui.status(

@@ -411,11 +411,18 @@ own quality:
     through the second identity (`_check_role_idor`); unlike Part 2's ±1
     ID-swap guess, a hit here is a genuinely distinct authenticated account
     retrieving the exact same object, so it's reported at `FIRM` rather than
-    `TENTATIVE`. **Known limit:** reuses the primary login URL/method/
-    success-failure signals rather than taking a fully independent second
-    login config — covers the common case (one login form, two accounts);
-    an app whose roles log in through genuinely different endpoints needs a
-    follow-up.
+    `TENTATIVE`.
+    **Independent second login config — ✅ shipped.** `--role2-login-url`/
+    `--role2-login-method`/`--role2-login-success-text`/
+    `--role2-login-failure-text` each override the corresponding primary
+    `--login-*` flag for the role-matrix identity only, defaulting to the
+    primary's own value when omitted — so an app whose roles log in
+    through genuinely different endpoints (e.g. a separate admin portal
+    with its own field names) is now supported, not just "one login form,
+    two accounts." Verified end-to-end against a real two-endpoint local
+    server (`/user-login` with fields `u`/`p`, `/admin-login` with fields
+    `username`/`secret`, each setting its own session cookie) — both
+    identities authenticate independently through their own endpoint.
   - ✅ *shipped:* **OAuth2/OIDC** token flows — `core/auth.py`'s
     `OAuth2Authenticator` exchanges credentials for a bearer access token at
     the authorization server's token endpoint (RFC 6749 §4.3/§4.4) and
@@ -1038,3 +1045,14 @@ Ordered by impact; several are now *resolved by the plan above*.
   body phrase, correctly detected through the full `.get()` path). Known
   limit remains signature-based — a block page matching neither a header
   nor a listed body phrase still isn't detected.
+- 2026-10-15 — Role-matrix independent second login config shipped
+  (`--role2-login-url`/`--role2-login-method`/`--role2-login-success-text`/
+  `--role2-login-failure-text`), closing the last open item under
+  "Authenticated scanning" follow-ups: each overrides the corresponding
+  primary `--login-*` flag for the role-matrix identity only, defaulting to
+  the primary's value when omitted. No change to `core/auth.py` —
+  `FormLoginAuthenticator` already took arbitrary `login_url`/`method`/
+  `success_text`/`failure_text`; this was purely `scanner.py` wiring.
+  Verified end-to-end against a real two-endpoint local server (distinct
+  login URLs, distinct field names, distinct session cookies) — both
+  identities authenticate independently.

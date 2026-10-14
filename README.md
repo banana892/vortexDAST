@@ -145,6 +145,20 @@ vortex -u https://app.local/ \
   --role2-login-data "username=lowpriv&password=s3cret"
 ```
 
+If the second identity logs in through a genuinely different endpoint
+(e.g. a separate admin portal), override it with `--role2-login-url` (+
+`--role2-login-method`/`--role2-login-success-text`/
+`--role2-login-failure-text` as needed) — each defaults to the primary's
+own `--login-*` value when omitted:
+
+```bash
+vortex -u https://app.local/ \
+  --login-url https://app.local/login \
+  --login-data "username=lowpriv&password=s3cret" \
+  --role2-login-url https://admin.app.local/login \
+  --role2-login-data "username=root&password=s3cret"
+```
+
 OAuth2 has the same role matrix: reuse the primary identity's token endpoint/
 grant/scope and override only the identity-bearing field(s) —
 `--role2-oauth2-client-id` + `--role2-oauth2-client-secret` for
@@ -299,7 +313,9 @@ Key flag groups (run `vortex -h` for the full list):
   recovery), `--no-csrf-harvest` (disable hidden-field harvesting), `--mfa-url`
   + `--mfa-data` + `--mfa-method` + `--mfa-success-text` + `--mfa-failure-text`
   (multi-step/MFA, with `{totp:SECRET}` for a live code), `--role2-login-data`
-  (role-matrix: a second identity via the same login mechanism),
+  + `--role2-login-url`/`--role2-login-method`/`--role2-login-success-text`/
+  `--role2-login-failure-text` (role-matrix: a second identity, optionally
+  through its own login endpoint),
   `--oauth2-token-url` + `--oauth2-grant-type` + `--oauth2-client-id` +
   `--oauth2-client-secret` + `--oauth2-username` + `--oauth2-password` +
   `--oauth2-scope` (OAuth2/OIDC bearer-token auth — `password` or
