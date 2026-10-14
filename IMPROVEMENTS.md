@@ -238,10 +238,28 @@ own quality:
   Chromium run (`tests/test_dom_watcher.py`): a fixture page that echoes
   the request's own `Cookie`/`Authorization` headers back into a link
   confirms the browser actually sent them, and a separate HTTP Basic
-  challenge-response page confirms `http_credentials`. **Known limit:** a
-  cookie with no explicit `Domain` attribute falls back to the seed URL's
-  host — correct for the common single-host scan, but wrong for a cookie
-  scoped to a different host reached via a redirect during login.
+  challenge-response page confirms `http_credentials`.
+  **Dotless-hostname cookie domain — ✅ fixed.** The originally-suspected gap
+  ("a cookie scoped to a different host reached via a redirect during login
+  would be mis-attributed") turned out not to reproduce — `requests` itself
+  extracts cookies per-hop via its own redirect machinery (confirmed for
+  `Requester`'s scope-aware manual redirect walk too, since it still routes
+  every hop through `Session.send()`), so a host-only cookie's `.domain` is
+  already the real issuing host, not the seed URL's, even across a
+  cross-host login redirect. Investigating turned up a real, different bug
+  instead: Python's `http.cookiejar` (RFC 2965's `eff_request_host()`)
+  appends a synthetic `.local` to any **dotless** hostname's host-only
+  cookie domain — a cookie from `http://localhost/login` is stored as
+  `cookie.domain == "localhost.local"`, which doesn't match the page
+  Playwright actually renders, so the browser silently never sent it back.
+  `_to_playwright_cookies` now strips that suffix for host-only cookies
+  (`domain_specified=False` is the signal that it's cookiejar's synthetic
+  value, never a server's own explicit `Domain=`), fixing authenticated
+  `--dynamic` crawling against `localhost` and any other bare lab/container
+  hostname. Verified both as a fast unit test against a constructed
+  `http.cookiejar.Cookie` and end-to-end against a real headless Chromium
+  run and a real `requests` round-trip reproducing the exact
+  `"localhost.local"` quirk.
 - **API testing** — ✅ *all three sub-items shipped.* Until now nothing in the crawl/parse pipeline carried a JSON body, a content-type,
   or a REST path-param concept: `CrawledEndpoint` (`core/crawler.py`) had
   only `forms`/`links`/`query_params`, and `ParsedForm` (`core/parser.py`)
@@ -921,3 +939,17 @@ Ordered by impact; several are now *resolved by the plan above*.
   speedup rendering four ~1s pages concurrently, and every worker's launch
   forced to fail (monkeypatched `BrowserType.launch`) still returns promptly
   instead of hanging.
+- 2026-10-15 — `DomWatcher`'s dotless-hostname cookie bug fixed, closing its
+  last open cookie-domain shortcut: investigation showed the
+  originally-suspected "cross-host redirect mis-attribution" doesn't
+  actually occur (`requests` extracts cookies per-hop with the real issuing
+  host, including through `Requester`'s scope-aware manual redirect walk),
+  but turned up a real bug instead — Python's `http.cookiejar` appends a
+  synthetic `.local` to a dotless host's (`localhost`, a bare lab/container
+  hostname, ...) host-only cookie domain, which silently never matches the
+  page Playwright renders. `_to_playwright_cookies` strips that suffix for
+  host-only cookies (`domain_specified=False`), leaving any server's own
+  explicit `Domain=` untouched. Verified with a unit test against a
+  constructed `http.cookiejar.Cookie` and an end-to-end real-Chromium +
+  real-`requests` round-trip reproducing the exact `"localhost.local"`
+  quirk.

@@ -275,6 +275,109 @@ class TestDomWatcherAuthenticatedContext:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Dotless-hostname cookie domain ("localhost.local" cookiejar quirk)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _host_only_cookie(name: str, value: str, domain: str):
+    """A ``http.cookiejar.Cookie`` shaped exactly like one http.cookiejar
+    itself would store for a host-only (no explicit ``Domain=``) Set-Cookie —
+    ``domain_specified=False`` is the signal ``_to_playwright_cookies`` keys
+    on, which ``requests.cookies.RequestsCookieJar.set()`` can't produce
+    directly (it always sets ``domain_specified=True`` when given a domain).
+    """
+    import http.cookiejar
+
+    return http.cookiejar.Cookie(
+        version=0, name=name, value=value,
+        port=None, port_specified=False,
+        domain=domain, domain_specified=False, domain_initial_dot=False,
+        path="/", path_specified=True,
+        secure=False, expires=None, discard=True,
+        comment=None, comment_url=None, rest={},
+    )
+
+
+class TestDomWatcherDotlessHostCookie:
+    def test_to_playwright_cookies_strips_synthetic_local_suffix(self):
+        cookie = _host_only_cookie("SID", "abc", "localhost.local")
+        out = DomWatcher._to_playwright_cookies([cookie], "http://localhost:8080/")
+        assert out == [
+            {"name": "SID", "value": "abc", "domain": "localhost", "path": "/", "secure": False}
+        ]
+
+    def test_to_playwright_cookies_leaves_explicit_domain_alone(self):
+        import http.cookiejar
+
+        cookie = http.cookiejar.Cookie(
+            version=0, name="SID", value="abc", port=None, port_specified=False,
+            domain=".example.local", domain_specified=True, domain_initial_dot=True,
+            path="/", path_specified=True, secure=False, expires=None, discard=True,
+            comment=None, comment_url=None, rest={},
+        )
+        out = DomWatcher._to_playwright_cookies([cookie], "http://example.local/")
+        # A server that explicitly asked for ".example.local" is trusted as-is
+        # — only the *synthetic*, host-only case gets corrected.
+        assert out[0]["domain"] == ".example.local"
+
+    def test_to_playwright_cookies_leaves_real_domains_alone(self):
+        cookie = _host_only_cookie("SID", "abc", "app.example.com")
+        out = DomWatcher._to_playwright_cookies([cookie], "http://app.example.com/")
+        assert out[0]["domain"] == "app.example.com"
+
+    def test_dotless_host_cookie_reaches_the_browser(self):
+        """
+        End-to-end regression test for the bug itself: a real login response
+        against a dotless host ("localhost") issues a host-only cookie that
+        http.cookiejar stores as "localhost.local" — reproduced here via an
+        actual HTTP round-trip, not a constructed Cookie, since that's the
+        only way to get requests' real cookiejar behaviour. Before the fix,
+        this cookie would silently never reach the rendered page.
+        """
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import quote
+
+        import requests
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                cookie = quote(self.headers.get("Cookie", "none"))
+                body = (
+                    f'<html><body><a href="/confirmed?cookie={cookie}">go</a>'
+                    "</body></html>"
+                ).encode()
+                self.send_response(200)
+                self.send_header("Set-Cookie", "SID=abc; Path=/")
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            seed = f"http://localhost:{server.server_port}/"
+
+            session = requests.Session()
+            session.get(seed)
+            issued = next(iter(session.cookies))
+            assert issued.domain == "localhost.local"  # the quirk this test guards against
+
+            result = DomWatcher(max_depth=0, nav_timeout_ms=3000).crawl(
+                seed, cookies=session.cookies
+            )
+            endpoint = result.endpoints[0]
+            assert len(endpoint.links) == 1
+            assert "SID%3Dabc" in endpoint.links[0].url
+        finally:
+            server.shutdown()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # JSON API capture — passive fetch()/XHR observation (Phase D, scoped in
 # IMPROVEMENTS.md's "API testing" entry)
 # ─────────────────────────────────────────────────────────────────────────────

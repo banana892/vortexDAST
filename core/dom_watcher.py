@@ -56,10 +56,23 @@ Basic-auth session carries into the rendered browser context instead of
 every page rendering logged out. ``scanner.py`` passes these through from
 the same authenticated ``Requester`` used for the static crawl.
 
-shortcut: a cookie with no explicit ``Domain`` attribute falls back to the
-seed URL's host — correct for the common single-host scan, but a cookie
-scoped to a different host reached via a redirect during login would be
-mis-attributed; upgrade if that case matters in practice.
+A cookie with no explicit ``Domain`` attribute is "host-only": Python's
+``http.cookiejar`` already stores it against whichever host actually issued
+it (including mid-redirect, even across a login that hops hosts), not the
+scan's seed URL — a cookie genuinely never carrying any host at all (e.g.
+one supplied via the operator's own ``--cookie`` string, never seen in an
+HTTP response) is the one real case left with nothing to attribute it to,
+and falls back to the seed URL's host as the only sensible default.
+
+Host-only cookies from a **dotless** hostname (``localhost``, a bare lab/
+container hostname, ...) get a corrected domain too: ``http.cookiejar``
+(RFC 2965's ``eff_request_host()``) appends a synthetic ``.local`` to any
+such host's effective domain — a cookie from ``http://localhost/login``
+ends up stored as ``cookie.domain == "localhost.local"``, which doesn't
+match the page Playwright actually renders (``localhost``), so the browser
+would otherwise never send it back. ``_to_playwright_cookies`` strips that
+suffix for host-only cookies before handing them to
+``BrowserContext.add_cookies()``.
 """
 
 from __future__ import annotations
@@ -227,6 +240,18 @@ class DomWatcher:
         out: List[Dict[str, Any]] = []
         for cookie in cookies:
             domain = getattr(cookie, "domain", "") or fallback_domain
+            # Python's http.cookiejar (RFC 2965 eff_request_host()) appends a
+            # synthetic ".local" to any host-only cookie's domain when the
+            # issuing host has no dot in it — e.g. a cookie from
+            # "http://localhost/login" ends up with cookie.domain ==
+            # "localhost.local". That doesn't match the page Playwright
+            # actually renders ("localhost"), so the cookie silently never
+            # gets sent. domain_specified=False means this IS that synthetic
+            # value (never a server's own explicit Domain=...), so it's safe
+            # to undo. Affects any dotless hostname: "localhost", a bare lab/
+            # container hostname, etc. — not real domains or IP addresses.
+            if not getattr(cookie, "domain_specified", True) and domain.endswith(".local"):
+                domain = domain[: -len(".local")]
             if not domain or not getattr(cookie, "name", None):
                 continue
             out.append({
