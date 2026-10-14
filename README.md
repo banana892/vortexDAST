@@ -145,6 +145,19 @@ vortex -u https://app.local/ \
   --role2-login-data "username=lowpriv&password=s3cret"
 ```
 
+OAuth2 has the same role matrix: reuse the primary identity's token endpoint/
+grant/scope and override only the identity-bearing field(s) —
+`--role2-oauth2-client-id` + `--role2-oauth2-client-secret` for
+`client_credentials`, `--role2-oauth2-username` + `--role2-oauth2-password`
+for `password`, `--role2-oauth2-login-data` for `authorization_code`:
+
+```bash
+vortex -u https://api.app.local/ \
+  --oauth2-token-url https://idp.local/oauth/token \
+  --oauth2-client-id admin-svc --oauth2-client-secret s3cret \
+  --role2-oauth2-client-id lowpriv-svc --role2-oauth2-client-secret s3cret
+```
+
 JS-rendered SPA (opt-in; headless Chromium renders each page before the
 crawler extracts links/forms — closes modern SPAs that show nothing to a
 plain HTTP GET):
@@ -277,7 +290,10 @@ Key flag groups (run `vortex -h` for the full list):
   `--oauth2-scope` (OAuth2/OIDC bearer-token auth — `password` or
   `client_credentials`; mutually exclusive with `--login-url`), plus
   `--oauth2-authorize-url` + `--oauth2-redirect-uri` + `--oauth2-login-data`
-  for `--oauth2-grant-type authorization_code` (+ PKCE, browser-driven)
+  for `--oauth2-grant-type authorization_code` (+ PKCE, browser-driven),
+  `--role2-oauth2-username`/`-password` + `--role2-oauth2-client-id`/`-secret`
+  + `--role2-oauth2-login-data` (role-matrix: a second OAuth2 identity,
+  reusing the primary's token endpoint/grant/scope)
 - **Network recon (opt-in):** `--port-scan`, `--ports`, `--subnet`,
   `--max-subnet-hosts`, `--subnet-workers`
 - **External tools (opt-in):** `--tools` (`all` or a comma list, e.g.

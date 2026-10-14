@@ -394,8 +394,26 @@ own quality:
     then). **Known limit:** only a single login-form submission is driven —
     a login page needing its own MFA step isn't handled — and only an HTTP
     3xx `Location` redirect is recognised, not a client-side (JS/meta-
-    refresh) one. OAuth2 still has no role-matrix (`--role2-*`) equivalent
-    for any grant.
+    refresh) one.
+  - ✅ *shipped:* **role matrix for OAuth2** (`--role2-oauth2-*`) — a second,
+    independently authenticated `OAuth2Authenticator`, mirroring
+    `--role2-login-data`'s "same mechanism, different credentials" shape:
+    reuses the primary identity's `--oauth2-token-url`/`--oauth2-grant-type`/
+    `--oauth2-scope` (and, for `authorization_code`, `--oauth2-authorize-url`/
+    `--oauth2-redirect-uri`), and only the identity-bearing field(s) differ —
+    `--role2-oauth2-username`+`--role2-oauth2-password` for `password`,
+    `--role2-oauth2-client-id`+`--role2-oauth2-client-secret` for
+    `client_credentials`, `--role2-oauth2-login-data` for `authorization_code`
+    (`--role2-oauth2-client-id`/`-secret` also double as an override for the
+    latter two grants' client registration, if the second identity's differs
+    from the primary's). Logs into its own `Requester`, wired into
+    `AccessControlCheckModule.set_role_requester()` exactly like the
+    form-login role matrix — same `_check_cross_identity_access`/
+    `_check_role_idor` machinery, unmodified. Verified end-to-end (two
+    distinct `client_credentials` identities against a local IdP, one
+    authorized for a resource the other is rejected from) and with a
+    role-matrix-specific test (`tests/test_auth.py`) proving two
+    simultaneously valid `OAuth2Authenticator` sessions never share state.
 
 ### Phase E — Tier-3 adapters + chaining polish
 - ~~ffuf~~ ✅ shipped early (curated-catalogue default wordlist, `-ac`
@@ -467,17 +485,18 @@ own quality:
 From assessing a real modern target (SPA + auth + API, on managed hosting).
 Ordered by impact; several are now *resolved by the plan above*.
 
-1. **Authenticated scanning** — ✅ *all follow-ups shipped, including the
-   browser-driven grant.*
+1. **Authenticated scanning** — ✅ *all follow-ups shipped, including every
+   grant's role-matrix equivalent.*
    `core/auth.py` (`FormLoginAuthenticator`) + `Requester.set_session_recovery`
    give form login, CSRF-token harvesting, multi-step/MFA (incl. live TOTP),
    and transparent mid-scan re-auth (replaying every configured step with a
-   fresh code). `--role2-login-data` adds a role-matrix second identity, and
-   `core/auth.py` (`OAuth2Authenticator`) adds OAuth2/OIDC bearer-token auth
-   — `password`/`client_credentials` (single HTTP call) and now
-   `authorization_code` + PKCE (headless-Chromium-driven) — all three with
-   refresh. See Phase D for detail; nothing is open here anymore beyond
-   OAuth2's missing role-matrix equivalent, tracked there as a known limit.
+   fresh code). `--role2-login-data` adds a role-matrix second identity for
+   form login, and `core/auth.py` (`OAuth2Authenticator`) adds OAuth2/OIDC
+   bearer-token auth — `password`/`client_credentials` (single HTTP call)
+   and `authorization_code` + PKCE (headless-Chromium-driven) — all three
+   with refresh, and all three now with their own role-matrix second
+   identity (`--role2-oauth2-*`). See Phase D for detail; nothing is open
+   here anymore.
 2. **No JS/SPA rendering** — ✅ *resolved by Phase D* (`DomWatcher`,
    `--dynamic`). A thin static-only result is still possible if `--dynamic`
    is left off, but it's no longer the only option.
@@ -633,7 +652,8 @@ Ordered by impact; several are now *resolved by the plan above*.
   `access_control_check` diffs against the primary session.
 - OAuth2/OIDC bearer-token authentication (`password`/`client_credentials`/
   `authorization_code`+PKCE grants + refresh-token recovery), as an
-  alternative to form login.
+  alternative to form login, with its own role-matrix second identity
+  (`--role2-oauth2-*`) for every grant.
 - Tool orchestration (Phases A + B + C + E, complete): `ToolAdapter`
   framework, `--tools` / `--no-tools` / `--tool-timeout` / `--list-tools`, 9
   adapters (nuclei, nmap, httpx, ffuf, sqlmap, interactsh, nikto,
@@ -857,3 +877,17 @@ Ordered by impact; several are now *resolved by the plan above*.
   Known limits: only a single login-form submission is driven (no MFA step
   on the IdP's own login page) and only an HTTP 3xx redirect is recognised,
   not a client-side one; OAuth2 still has no role-matrix equivalent.
+- 2026-10-15 — OAuth2 role-matrix second identity shipped (`--role2-oauth2-*`),
+  the last open item under "Authenticated scanning": a second
+  `OAuth2Authenticator`, same "same mechanism, different credentials" shape
+  as `--role2-login-data`, reusing the primary identity's token endpoint/
+  grant/scope (and authorize URL/redirect URI for `authorization_code`) and
+  overriding only the identity-bearing field(s) — username/password,
+  client id/secret, or a second IdP login-form submission, depending on
+  grant. Wired into `AccessControlCheckModule.set_role_requester()` exactly
+  like the form-login role matrix, with no changes to that module's
+  cross-identity/IDOR logic. Verified end-to-end (two distinct
+  `client_credentials` identities against a local IdP, one authorized for a
+  resource the other is correctly rejected from) and with a dedicated test
+  proving two simultaneously valid `OAuth2Authenticator` sessions share no
+  state. Closes "Authenticated scanning" completely — no open items remain.

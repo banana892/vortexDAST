@@ -1050,3 +1050,131 @@ def test_oauth2_authorization_code_reauthenticate_without_refresh_token_redoes_b
         assert authcode_server.current_access_token != first_token
     finally:
         req.close()
+
+
+# ── OAuth2 role matrix (two independent identities) ────────────────────────
+#
+# scanner.py's --role2-oauth2-* wiring authenticates a *second*
+# OAuth2Authenticator (its own client_id/secret, username/password, or IdP
+# login) into its own Requester, then hands that session to
+# access_control_check.set_role_requester() — exactly the mechanism this
+# test exercises directly, independent of scanner.py's argument plumbing
+# (which has no CLI-level test harness in this suite; see core/auth.py's own
+# unit tests above for each grant individually).
+
+
+class _RoleMatrixOAuth2Server:
+    """
+    A client_credentials IdP with two distinct registered clients, each
+    minted its own independently valid token:
+      POST /token (client_id/client_secret: "admin-svc"/"adminsecret" or
+                   "user-svc"/"usersecret") -> {access_token, expires_in}
+      GET  /admin-only (Bearer <admin-svc's token>) -> 200 "admin area"
+                                                     -> 401 otherwise
+    """
+
+    _CLIENTS = {"admin-svc": "adminsecret", "user-svc": "usersecret"}
+
+    def __init__(self) -> None:
+        self._tokens: dict[str, str] = {}  # token -> client_id
+        server = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def _json(self, code, payload):
+                data = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_POST(self):
+                if urlsplit(self.path).path != "/token":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                n = int(self.headers.get("Content-Length") or 0)
+                form = parse_qs(self.rfile.read(n).decode())
+                cid = (form.get("client_id") or [None])[0]
+                secret = (form.get("client_secret") or [None])[0]
+                if server._CLIENTS.get(cid) != secret:
+                    self._json(400, {"error": "invalid_client"})
+                    return
+                token = secrets.token_hex(8)
+                server._tokens[token] = cid
+                self._json(200, {"access_token": token, "expires_in": 3600})
+
+            def do_GET(self):
+                if urlsplit(self.path).path != "/admin-only":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                auth_header = self.headers.get("Authorization", "")
+                token = auth_header[len("Bearer "):] if auth_header.startswith("Bearer ") else None
+                if server._tokens.get(token) == "admin-svc":
+                    self._json(200, {"body": "admin area"})
+                else:
+                    self._json(401, {"error": "unauthorized"})
+
+            def log_message(self, *a):
+                pass
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._httpd.server_address[1]
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def base(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def close(self) -> None:
+        self._httpd.shutdown()
+
+
+@pytest.fixture
+def role_matrix_oauth2_server():
+    s = _RoleMatrixOAuth2Server()
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+def test_oauth2_role_matrix_two_identities_get_independent_sessions(role_matrix_oauth2_server):
+    base = role_matrix_oauth2_server.base
+    primary_req = _requester()
+    role_req = _requester()
+    try:
+        primary = OAuth2Authenticator(
+            token_url=f"{base}/token",
+            grant_type="client_credentials",
+            client_id="admin-svc",
+            client_secret="adminsecret",
+        )
+        role2 = OAuth2Authenticator(
+            token_url=f"{base}/token",
+            grant_type="client_credentials",
+            client_id="user-svc",
+            client_secret="usersecret",
+        )
+        assert primary.login(primary_req) is True
+        assert role2.login(role_req) is True
+
+        # Distinct bearer tokens, each attached to its own session — the two
+        # identities never share state despite hitting the same token_url.
+        assert (
+            primary_req.session.headers["Authorization"]
+            != role_req.session.headers["Authorization"]
+        )
+
+        resp_primary, _ = primary_req.get(f"{base}/admin-only")
+        resp_role2, _ = role_req.get(f"{base}/admin-only")
+        assert resp_primary.status_code == 200
+        # The exact access-control diff a role matrix exists to surface.
+        assert resp_role2.status_code == 401
+    finally:
+        primary_req.close()
+        role_req.close()

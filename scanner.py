@@ -1044,7 +1044,54 @@ def _build_parser() -> argparse.ArgumentParser:
             "--login-method/--login-success-text/--login-failure-text. "
             "access_control_check then diffs what each identity can reach to "
             "surface vertical/horizontal broken access control. Requires "
-            "--login-url."
+            "--login-url. Mutually exclusive with --role2-oauth2-*."
+        ),
+    )
+    parser.add_argument(
+        "--role2-oauth2-username",
+        default=None,
+        metavar="USER",
+        help=(
+            "Role-matrix testing for --oauth2-grant-type password: a second "
+            "resource-owner identity (needs --role2-oauth2-password too). "
+            "Reuses --oauth2-token-url/--oauth2-client-id/--oauth2-scope "
+            "unless --role2-oauth2-client-id/--role2-oauth2-client-secret "
+            "override them. Requires --oauth2-token-url."
+        ),
+    )
+    parser.add_argument(
+        "--role2-oauth2-password",
+        default=None,
+        metavar="PASS",
+        help="Password for --role2-oauth2-username.",
+    )
+    parser.add_argument(
+        "--role2-oauth2-client-id",
+        default=None,
+        metavar="ID",
+        help=(
+            "Role-matrix testing for --oauth2-grant-type client_credentials: "
+            "a second service-level client (needs --role2-oauth2-client-secret "
+            "too). For password/authorization_code, overrides the client id "
+            "used for the second identity if its IdP registration differs "
+            "from the primary one's."
+        ),
+    )
+    parser.add_argument(
+        "--role2-oauth2-client-secret",
+        default=None,
+        metavar="SECRET",
+        help="Client secret for --role2-oauth2-client-id.",
+    )
+    parser.add_argument(
+        "--role2-oauth2-login-data",
+        default=None,
+        metavar="FIELDS",
+        help=(
+            "Role-matrix testing for --oauth2-grant-type authorization_code: "
+            "a second IdP login-form submission ('name=value&...' syntax, "
+            "same as --oauth2-login-data), reusing --oauth2-authorize-url/"
+            "--oauth2-redirect-uri."
         ),
     )
 
@@ -1631,6 +1678,16 @@ def run_scan(args: argparse.Namespace) -> int:
     if getattr(args, "login_url", None) and getattr(args, "oauth2_token_url", None):
         print("[ERROR] --login-url and --oauth2-token-url are mutually exclusive.", file=sys.stderr)
         return 2
+    role2_oauth2_requested = any(
+        getattr(args, f, None)
+        for f in ("role2_oauth2_username", "role2_oauth2_client_id", "role2_oauth2_login_data")
+    )
+    if role2_oauth2_requested and not getattr(args, "oauth2_token_url", None):
+        print("[ERROR] --role2-oauth2-* requires --oauth2-token-url.", file=sys.stderr)
+        return 2
+    # No separate check against --role2-login-data: that flag requires
+    # --login-url, which is already mutually exclusive with --oauth2-token-url
+    # (required above for --role2-oauth2-*), so the two can never both apply.
     if getattr(args, "oauth2_token_url", None):
         if not getattr(args, "oauth2_client_id", None):
             print("[ERROR] --oauth2-token-url requires --oauth2-client-id.", file=sys.stderr)
@@ -1683,6 +1740,89 @@ def run_scan(args: argparse.Namespace) -> int:
             oauth2_authenticator.is_session_valid,
             lambda: oauth2_authenticator.reauthenticate(requester),
         )
+
+        # ── Role-matrix second identity (OAuth2) (optional) ─────────────────
+        # Same token endpoint/grant, a different identity, its own session —
+        # lets access_control_check diff what each identity can reach, same
+        # as the form-login role matrix below.
+        if role2_oauth2_requested:
+            try:
+                if args.oauth2_grant_type == "password":
+                    if not (args.role2_oauth2_username and args.role2_oauth2_password):
+                        print(
+                            "[ERROR] --oauth2-grant-type password role-matrix needs "
+                            "--role2-oauth2-username and --role2-oauth2-password.",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    role2_oauth2_authenticator: OAuth2Authenticator = OAuth2Authenticator(
+                        token_url=args.oauth2_token_url,
+                        grant_type="password",
+                        client_id=args.role2_oauth2_client_id or args.oauth2_client_id,
+                        client_secret=args.role2_oauth2_client_secret or args.oauth2_client_secret,
+                        username=args.role2_oauth2_username,
+                        password=args.role2_oauth2_password,
+                        scope=args.oauth2_scope,
+                    )
+                elif args.oauth2_grant_type == "client_credentials":
+                    if not (args.role2_oauth2_client_id and args.role2_oauth2_client_secret):
+                        print(
+                            "[ERROR] --oauth2-grant-type client_credentials role-matrix "
+                            "needs --role2-oauth2-client-id and "
+                            "--role2-oauth2-client-secret.",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    role2_oauth2_authenticator = OAuth2Authenticator(
+                        token_url=args.oauth2_token_url,
+                        grant_type="client_credentials",
+                        client_id=args.role2_oauth2_client_id,
+                        client_secret=args.role2_oauth2_client_secret,
+                        scope=args.oauth2_scope,
+                    )
+                else:  # authorization_code
+                    if not args.role2_oauth2_login_data:
+                        print(
+                            "[ERROR] --oauth2-grant-type authorization_code role-matrix "
+                            "needs --role2-oauth2-login-data.",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    role2_oauth2_authenticator = OAuth2Authenticator(
+                        token_url=args.oauth2_token_url,
+                        grant_type="authorization_code",
+                        client_id=args.role2_oauth2_client_id or args.oauth2_client_id,
+                        client_secret=args.role2_oauth2_client_secret or args.oauth2_client_secret,
+                        authorize_url=args.oauth2_authorize_url,
+                        redirect_uri=args.oauth2_redirect_uri,
+                        login_credentials=parse_login_data(args.role2_oauth2_login_data),
+                        scope=args.oauth2_scope,
+                    )
+            except ValueError as exc:
+                print(f"[ERROR] invalid --role2-oauth2-* configuration: {exc}", file=sys.stderr)
+                return 2
+
+            role_requester = Requester(
+                timeout=timeout,
+                user_agent=str(req_cfg.get("user_agent", "VortexDAST/1.0")),
+                rate_limit_rps=rate_limit_rps,
+                verify_ssl=verify_ssl,
+                proxy=proxy,
+                max_retries=int(req_cfg.get("max_retries", 3)),
+                max_workers=threads,
+            )
+            if role2_oauth2_authenticator.login(role_requester):
+                ui.status(
+                    console, theme, "ok", "Role-matrix identity authenticated",
+                    f"second OAuth2 session established via {args.oauth2_token_url}",
+                )
+            else:
+                ui.status(
+                    console, theme, "error", "Role-matrix login failed",
+                    "--role2-oauth2-* was rejected — continuing without role-matrix checks",
+                )
+                role_requester.close()
+                role_requester = None
     if getattr(args, "login_url", None):
         if not getattr(args, "login_data", None):
             print("[ERROR] --login-url requires --login-data.", file=sys.stderr)
