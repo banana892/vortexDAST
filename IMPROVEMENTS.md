@@ -297,6 +297,21 @@ own quality:
      Verified against a real headless-Chromium run (`tests/test_dom_watcher.py`):
      a fixture page's inline `fetch()` POST is captured as a synthetic
      `/api/widgets` endpoint carrying the exact JSON body sent.
+     **Dedup follow-up — ✅ fixed.** The capture-time dedup above really is
+     keyed on (method, URL); the bug was one and two steps downstream, where
+     folding captures into the endpoint list keyed on URL *alone* — so a
+     fetch()/XHR call to the exact same URL a page was rendered at (GET, by
+     definition — e.g. a REST resource that's also a browsable page) was
+     silently dropped, since that URL string already "belonged" to the
+     rendered-page endpoint. Fixed at both points: `DomWatcher.crawl()`'s
+     own merge of `self._captured_json` into `result.endpoints`, and
+     `scanner.py`'s merge of `dynamic_result.endpoints` into the scan's
+     `crawl_result` — both now key a JSON-carrying endpoint's identity on
+     (method, URL), only ever comparing against *other* JSON-carrying
+     endpoints, while a plain page endpoint still dedups on URL alone
+     exactly as before. Verified with a regression test: a page rendered
+     at `/samepath` that also `fetch()`-POSTs to `/samepath` now yields two
+     distinct endpoints (the page, and the capture), not one.
   2. ✅ *shipped:* **Fuzzing — generalize the per-param pattern onto JSON
      leaves and REST path segments**, reusing each module's *existing*
      probe sets rather than adding new ones. The new shared
@@ -1084,3 +1099,12 @@ Ordered by impact; several are now *resolved by the plan above*.
   a Boolean-blind finding on a length-differential response, and a
   reproducing MySQL `SLEEP()` time-based finding), each reported with a
   `path:segment[...]` parameter label.
+- 2026-10-15 — `DomWatcher`'s JSON-capture dedup fixed, closing its last
+  open shortcut: folding a captured fetch()/XHR call into the endpoint
+  list was keyed on URL alone (in `DomWatcher.crawl()` and, one step
+  further downstream, `scanner.py`'s dynamic-crawl merge), so a capture to
+  the exact same URL a page was rendered at got silently dropped. Both
+  merge points now key a JSON-carrying endpoint on (method, URL), compared
+  only against other JSON-carrying endpoints — a plain page endpoint still
+  dedups on URL alone. New regression test: a page at `/samepath` that
+  also `fetch()`-POSTs to `/samepath` now yields two endpoints, not one.

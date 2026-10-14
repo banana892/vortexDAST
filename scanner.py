@@ -2133,10 +2133,25 @@ def run_scan(args: argparse.Namespace) -> int:
                 ),
             )
 
+            # A JSON-carrying endpoint is matched by (method, url), not url
+            # alone — a page the static crawl already found (GET, by
+            # definition) must not block a same-URL fetch()/XHR call the
+            # dynamic pass captured, since that's a different operation
+            # entirely (e.g. a REST resource that's also a browsable page).
             existing_urls = crawl_result.all_urls
-            new_endpoints = [
-                ep for ep in dynamic_result.endpoints if ep.url not in existing_urls
-            ]
+            existing_method_urls = {
+                (ep.json_requests[0].method, ep.url)
+                for ep in crawl_result.endpoints
+                if ep.json_requests
+            }
+            new_endpoints = []
+            for ep in dynamic_result.endpoints:
+                if ep.json_requests:
+                    if (ep.json_requests[0].method, ep.url) in existing_method_urls:
+                        continue
+                elif ep.url in existing_urls:
+                    continue
+                new_endpoints.append(ep)
             crawl_result.endpoints.extend(new_endpoints)
 
             json_endpoints = sum(1 for ep in new_endpoints if ep.json_requests)

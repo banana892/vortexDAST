@@ -201,14 +201,23 @@ class DomWatcher:
             # module can fuzz it via CrawledEndpoint.json_requests exactly
             # like it already fuzzes endpoint.forms — no new module hook.
             #
-            # shortcut: dedup/merge is by URL alone, so two captures to the
-            # same URL with different HTTP methods collapse into one
-            # synthetic endpoint; upgrade to (method, url) if that turns out
-            # to matter in practice.
-            existing_urls = result.all_urls
+            # Keyed by (method, url), not url alone: a page can be rendered
+            # (GET, via navigation) at the exact same URL an on-page fetch()
+            # POSTs/PUTs/PATCHes to — e.g. a REST resource that's also a
+            # browsable page — and that capture must not be dropped just
+            # because something else already exists at that URL string.
+            # _on_request's own (method, url) dedup already guarantees no
+            # two entries in self._captured_json collide, so this is only
+            # ever checked against *other already-added* JSON endpoints —
+            # kept explicit so that invariant stays enforced even if the
+            # capture path changes later.
+            existing_method_urls = {
+                (ep.json_requests[0].method, ep.url) for ep in result.endpoints if ep.json_requests
+            }
             added = 0
             for captured in self._captured_json:
-                if captured.url in existing_urls:
+                key = (captured.method, captured.url)
+                if key in existing_method_urls:
                     continue
                 result.endpoints.append(
                     CrawledEndpoint(
@@ -219,7 +228,7 @@ class DomWatcher:
                         json_requests=[captured],
                     )
                 )
-                existing_urls.add(captured.url)
+                existing_method_urls.add(key)
                 added += 1
             if added:
                 logger.info("  + %d JSON API endpoint(s) captured from page JS", added)

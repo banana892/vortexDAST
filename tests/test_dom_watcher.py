@@ -69,6 +69,17 @@ _PAGES = {
             body: JSON.stringify({name: 'gadget', qty: 3})
         }).catch(() => {});
         </script></body></html>""",
+    # A page that's *also* a REST resource: rendered via GET navigation
+    # (its own CrawledEndpoint) AND fetch()-POSTed to that exact same URL
+    # (a captured JSON endpoint) — the dedup-by-URL-alone bug would drop
+    # the latter because the former already "claims" that URL string.
+    "/samepath": """<!DOCTYPE html><html><body><script>
+        fetch('/samepath', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'ping'})
+        }).catch(() => {});
+        </script></body></html>""",
 }
 
 
@@ -409,6 +420,27 @@ class TestDomWatcherJsonCapture:
         ).crawl(spa_server + "jsonapi")
         assert all(ep.json_requests == [] for ep in result.endpoints)
         assert not any(ep.url.endswith("/api/widgets") for ep in result.endpoints)
+
+    def test_captured_json_not_dropped_by_same_url_page(self, spa_server):
+        """
+        A fetch() POST to the exact same URL the page itself was rendered
+        at must not be silently dropped just because that URL string
+        already "belongs" to the rendered-page endpoint — regression test
+        for dedup keyed on URL alone instead of (method, url).
+        """
+        result = DomWatcher(max_depth=0, nav_timeout_ms=self._TIMEOUT_MS).crawl(
+            spa_server + "samepath"
+        )
+        matching = [ep for ep in result.endpoints if ep.url.endswith("/samepath")]
+        assert len(matching) == 2
+
+        page_endpoint = next(ep for ep in matching if not ep.json_requests)
+        json_endpoint = next(ep for ep in matching if ep.json_requests)
+        assert page_endpoint is not json_endpoint
+
+        captured = json_endpoint.json_requests[0]
+        assert captured.method == "POST"
+        assert captured.body == {"action": "ping"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
