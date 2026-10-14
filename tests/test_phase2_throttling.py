@@ -50,6 +50,81 @@ def test_503_counts_only_with_retry_after() -> None:
     assert r.throttle_events == 1
 
 
+def test_plain_403_is_not_throttling() -> None:
+    r = _req(5.0)
+    r._record_status(403, {"Content-Type": "text/html"})
+    assert r.throttle_events == 0
+    assert r._min_interval == pytest.approx(0.2)
+
+
+def test_cloudflare_edge_block_is_throttling(caplog: pytest.LogCaptureFixture) -> None:
+    r = _req(5.0)
+    with caplog.at_level("WARNING", logger="core.requester"):
+        r._record_status(403, {"CF-RAY": "abc123-SJC", "Server": "cloudflare"})
+    assert r.throttle_events == 1
+    assert r._min_interval == pytest.approx(0.4)
+    assert "CDN/WAF edge block" in caplog.text
+
+
+def test_vercel_edge_block_is_throttling() -> None:
+    r = _req(5.0)
+    r._record_status(403, {"x-vercel-id": "sfo1::abcde-123"})
+    assert r.throttle_events == 1
+
+
+def test_waf_edge_block_recovers_like_any_other_throttle() -> None:
+    r = _req(5.0)
+    r._record_status(403, {"CF-RAY": "abc123-SJC"})
+    for _ in range(Requester._RECOVERY_STREAK):
+        r._record_status(200, {})
+    assert r._min_interval == pytest.approx(0.2)
+
+
+# ── Retry-After value parsing ───────────────────────────────────────────────
+
+
+def test_retry_after_delta_seconds_overrides_the_doubling_ceiling() -> None:
+    r = _req(5.0)
+    r._record_status(429, {"Retry-After": "10"})
+    assert r._min_interval == pytest.approx(10.0)
+
+
+def test_retry_after_http_date_is_parsed() -> None:
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    r = _req(5.0)
+    future = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=5))
+    r._record_status(429, {"Retry-After": future})
+    assert r._min_interval == pytest.approx(5.0, abs=1.5)
+
+
+def test_retry_after_is_capped() -> None:
+    r = _req(5.0)
+    r._record_status(429, {"Retry-After": "99999"})
+    assert r._min_interval == Requester._MAX_RETRY_AFTER_WAIT
+
+
+def test_retry_after_in_the_past_is_ignored() -> None:
+    r = _req(5.0)
+    r._record_status(429, {"Retry-After": "0"})
+    assert r._min_interval == pytest.approx(0.4)
+
+
+def test_retry_after_garbage_is_ignored() -> None:
+    r = _req(5.0)
+    r._record_status(429, {"Retry-After": "not-a-date"})
+    assert r._min_interval == pytest.approx(0.4)
+
+
+def test_parse_retry_after_directly() -> None:
+    assert Requester._parse_retry_after(None) is None
+    assert Requester._parse_retry_after("0") is None
+    assert Requester._parse_retry_after("-5") is None
+    assert Requester._parse_retry_after("3") == pytest.approx(3.0)
+    assert Requester._parse_retry_after("bogus") is None
+
+
 def test_recovers_to_configured_rate() -> None:
     r = _req(5.0)
     for _ in range(3):

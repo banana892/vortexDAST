@@ -44,10 +44,12 @@ if the computed sleep time would exceed the guard, the limiter raises
 
 from __future__ import annotations
 
+import datetime
 import logging
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 import requests
@@ -355,11 +357,72 @@ class Requester:
     #: Consecutive unthrottled responses before halving the interval again.
     _RECOVERY_STREAK = 50
 
+    #: Response headers that identify a CDN/WAF edge (Cloudflare, Vercel, AWS
+    #: CloudFront/WAF, Akamai, Sucuri, Imperva/Incapsula, Fastly). A 403 that
+    #: carries one of these is almost always an edge block/challenge page
+    #: rather than the application's own 403, so it is treated as throttling
+    #: too — plain 429-halving alone never catches it.
+    _WAF_EDGE_HEADER_NAMES = frozenset({
+        "cf-ray", "cf-mitigated",
+        "x-sucuri-id", "x-sucuri-cache",
+        "x-akamai-transformed",
+        "x-amz-cf-id", "x-amz-cf-pop",
+        "x-iinfo",
+        "x-vercel-id", "x-vercel-mitigated",
+        "x-denied-reason",
+    })
+
+    #: Cap on an explicit Retry-After-derived wait, so one header can't stall
+    #: a whole scan — same spirit as _THROTTLE_MAX_INTERVAL's existing ceiling,
+    #: just higher since this one is the server explicitly telling us a number.
+    _MAX_RETRY_AFTER_WAIT = 30.0
+
+    @classmethod
+    def _is_waf_edge_block(cls, status: int, headers: Any) -> bool:
+        """Best-effort fingerprint: a 403 with a recognised CDN/WAF header."""
+        if status != 403 or not headers:
+            return False
+        names = {str(k).lower() for k in headers}
+        if names & cls._WAF_EDGE_HEADER_NAMES:
+            return True
+        server = str(headers.get("Server") or "").lower()
+        return "cloudflare" in server or "sucuri" in server
+
+    @classmethod
+    def _parse_retry_after(cls, value: Any) -> Optional[float]:
+        """
+        Parse a ``Retry-After`` header value into seconds from now.
+
+        RFC 7231 §7.1.3 allows either delta-seconds (``"120"``) or an
+        HTTP-date (``"Wed, 21 Oct 2015 07:28:00 GMT"``); both forms are
+        handled. Returns ``None`` if absent, unparseable, or already in the
+        past; otherwise the wait, capped at ``_MAX_RETRY_AFTER_WAIT``.
+        """
+        if value is None:
+            return None
+        text = str(value).strip()
+        try:
+            seconds = float(text)
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(text)
+            except (TypeError, ValueError, IndexError):
+                return None
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=datetime.timezone.utc)
+            seconds = (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+        if seconds <= 0:
+            return None
+        return min(seconds, cls._MAX_RETRY_AFTER_WAIT)
+
     def _record_status(self, status: int, headers: Any) -> None:
         """Slow the global rate limiter when the target throttles; recover gradually."""
         # urllib3 has already retried 429/503 by this point, so a final one means
         # the target is still pushing back.
-        throttled = status == 429 or (status == 503 and "Retry-After" in (headers or {}))
+        headers = headers or {}
+        waf_block = self._is_waf_edge_block(status, headers)
+        throttled = status == 429 or (status == 503 and "Retry-After" in headers) or waf_block
+        retry_after = self._parse_retry_after(headers.get("Retry-After")) if throttled else None
         message = None
         with self._rate_lock:
             if throttled:
@@ -369,10 +432,18 @@ class Requester:
                     self._THROTTLE_MAX_INTERVAL,
                     max(self._min_interval * 2, self._THROTTLE_FLOOR_INTERVAL),
                 )
+                # An explicit Retry-After overrides the blind-doubling ceiling —
+                # the server told us a real number, so honour it even past
+                # _THROTTLE_MAX_INTERVAL (still bounded by _MAX_RETRY_AFTER_WAIT).
+                if retry_after is not None:
+                    slower = max(slower, retry_after)
                 if slower > self._min_interval:
                     self._min_interval = slower
+                    reason = "CDN/WAF edge block" if waf_block else f"HTTP {status}"
+                    if retry_after is not None:
+                        reason += f", Retry-After {retry_after:.1f}s"
                     message = (
-                        f"Target is throttling (HTTP {status}) — slowing to "
+                        f"Target is throttling ({reason}) — slowing to "
                         f"{1 / slower:.1f} req/s."
                     )
             elif self._min_interval > self._base_interval:

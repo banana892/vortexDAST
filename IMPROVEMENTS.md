@@ -562,8 +562,22 @@ Ordered by impact; several are now *resolved by the plan above*.
   (no auth boundary = no IDOR) and only swaps params whose name looks like an
   object reference, so public pages and numeric navigation params (`page`,
   `offset`, …) are no longer flagged.
-- **Edge-WAF-aware backoff** — beyond basic 429-halving, detect CDN/WAF
-  throttling (e.g. Vercel/Cloudflare) and slow/pause gracefully.
+- **Edge-WAF-aware backoff** — ✅ *fixed.* `Requester._record_status` now also
+  treats a `403` carrying a recognised CDN/WAF fingerprint header (Cloudflare's
+  `CF-RAY`/`CF-Mitigated`, Vercel's `X-Vercel-Id`/`X-Vercel-Mitigated`, AWS
+  CloudFront's `X-Amz-Cf-Id`, Akamai's `X-Akamai-Transformed`, Sucuri's
+  `X-Sucuri-Id`, Imperva/Incapsula's `X-Iinfo`, or a `Server: cloudflare`/
+  `sucuri` header) as throttling, since an edge block/challenge page is a
+  distinct signal from the application's own 403s and plain 429-halving never
+  caught it. It also now parses the actual `Retry-After` value (delta-seconds
+  or an HTTP-date, RFC 7231 §7.1.3 — `_parse_retry_after`) and lets an
+  explicit value override the blind-doubling ceiling, capped at
+  `_MAX_RETRY_AFTER_WAIT` (30s) so one header can't stall a whole scan.
+  Everything stays inside the existing non-blocking slot-reservation model —
+  no new sleep call, just a larger `_min_interval` the next dispatch already
+  honours. **Known limit:** header-fingerprint matching only; a WAF that
+  returns a bare 403 with none of these headers (or masks them) still isn't
+  detected.
 
 ---
 
@@ -760,6 +774,14 @@ Ordered by impact; several are now *resolved by the plan above*.
   `core/parser.py`'s `_extract_field` was unconditionally dropping every
   `<input type="file">`, so no module could ever have found an upload form
   at all — fixed to keep it as `field_type="file"`.
+- 2026-10-14 — Edge-WAF-aware backoff shipped: `Requester._record_status`
+  recognises CDN/WAF edge-block fingerprint headers (Cloudflare, Vercel, AWS
+  CloudFront, Akamai, Sucuri, Imperva/Incapsula) on a `403` and treats it as
+  throttling, reusing the existing halve/floor/ceiling/recovery machinery.
+  `Retry-After` is now also parsed for its actual value (delta-seconds or an
+  HTTP-date) rather than only gating on presence, and an explicit value
+  overrides the blind-doubling ceiling (capped at 30s). Last open item under
+  "Operational / safety."
 - 2026-10-14 — §5 item 6 "shallow detectors" closed, the last open item in
   that section: `traversal_check` gained POST-form coverage (a new shared
   `_probe_param` helper backs both the existing GET path and a new POST
