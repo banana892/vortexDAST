@@ -43,8 +43,11 @@ This module adds the two missing pieces:
   Chromium (via Playwright, same engine as `core/dom_watcher.py`) through the
   authorization server's own login page, intercepts the browser's navigation
   back to the registered ``redirect_uri`` to pull the code out of the URL
-  without ever needing that URI to resolve to anything real, and exchanges it
-  for a token with the PKCE verifier. All three grants support token refresh.
+  without ever needing that URI to resolve to anything real, optionally
+  filling an MFA step the IdP's post-login redirect renders next (same
+  ``mfa_data``/``{totp:SECRET}`` semantics as ``FormLoginAuthenticator``),
+  and exchanges the code for a token with the PKCE verifier. All three
+  grants support token refresh.
   Same ``login``/``is_session_valid``/``reauthenticate`` shape as
   :class:`FormLoginAuthenticator`, so it plugs into
   :meth:`Requester.set_session_recovery` the same way.
@@ -53,12 +56,13 @@ Scope of this scaffold
 -----------------------
 Form-based login (GET or POST), CSRF-token harvesting, two-step/MFA logins,
 and all three OAuth2/OIDC grants (``password``, ``client_credentials``,
-``authorization_code`` + PKCE) are implemented and tested. A multi-identity
-"role matrix" comparison for form logins is implemented in
-`modules/access_control_check.py` (`--role2-login-data`); OAuth2 has no
-role-matrix equivalent yet. The ``authorization_code`` grant only drives a
-single login-form submission — a login page requiring its own MFA step is
-not handled.
+``authorization_code`` + PKCE, each including its own MFA step) are
+implemented and tested. A multi-identity "role matrix" comparison is
+implemented for both form login (`modules/access_control_check.py`,
+`--role2-login-data`) and every OAuth2 grant (`--role2-oauth2-*`) — neither
+drives an MFA step for the role-matrix second identity, since a second
+account's MFA secret always differs per-account and there's no per-identity
+MFA config to plug in yet.
 """
 
 from __future__ import annotations
@@ -371,12 +375,15 @@ class OAuth2Authenticator:
       server's login page, this drives a real headless Chromium (Playwright)
       through it instead: navigate to the ``authorize_url`` with a generated
       PKCE challenge, fill ``login_credentials`` into the rendered login
-      form's inputs (matched by ``name`` attribute) and submit, then capture
-      the browser's navigation back to ``redirect_uri`` — intercepted before
-      it actually fires, so ``redirect_uri`` never needs to resolve to a real
-      endpoint and the one-time code is never consumed by anything but this
-      authenticator — and exchange the code plus the PKCE verifier for a
-      token at ``token_url``.
+      form's inputs (matched by ``name`` attribute) and submit. If the code
+      hasn't arrived yet (this IdP's own flow renders an MFA page next), the
+      same fill-and-submit mechanism runs again against ``mfa_data`` before
+      falling through to a no-op when the code already arrived without one.
+      Either way, capture the browser's navigation back to ``redirect_uri``
+      — intercepted before it actually fires, so ``redirect_uri`` never
+      needs to resolve to a real endpoint and the one-time code is never
+      consumed by anything but this authenticator — and exchange the code
+      plus the PKCE verifier for a token at ``token_url``.
 
     All three support token refresh via a returned ``refresh_token``.
 
@@ -407,6 +414,15 @@ class OAuth2Authenticator:
         Field-name → value map filled into the rendered login page's inputs
         (by ``name`` attribute) before it's submitted. Required for
         ``"authorization_code"``.
+    mfa_data:
+        Optional field-name → value map for an MFA step the IdP's own
+        post-login redirect may render next, for ``"authorization_code"``
+        only. A value shaped exactly like ``"{totp:BASE32SECRET}"`` is
+        replaced with a live RFC 6238 code at submission time (recomputed
+        on every re-authentication), same semantics as
+        :class:`FormLoginAuthenticator`'s ``mfa_data``; any other value is
+        submitted verbatim. Ignored (no-op) if the code already arrived
+        without one — this IdP didn't need it.
     nav_timeout_ms:
         Per-step navigation/fill/submit timeout for the browser-driven
         ``"authorization_code"`` flow.
@@ -425,6 +441,7 @@ class OAuth2Authenticator:
         authorize_url: Optional[str] = None,
         redirect_uri: Optional[str] = None,
         login_credentials: Optional[Dict[str, str]] = None,
+        mfa_data: Optional[Dict[str, str]] = None,
         nav_timeout_ms: int = 20_000,
     ) -> None:
         if grant_type not in ("password", "client_credentials", "authorization_code"):
@@ -451,6 +468,7 @@ class OAuth2Authenticator:
         self.authorize_url = authorize_url
         self.redirect_uri = redirect_uri
         self.login_credentials = login_credentials or {}
+        self.mfa_data = mfa_data or {}
         self.nav_timeout_ms = nav_timeout_ms
         self._expires_at: Optional[float] = None
         self._refresh_token: Optional[str] = None
@@ -620,7 +638,8 @@ class OAuth2Authenticator:
                         # chasing a since-captured (or unreachable) redirect isn't fatal
                         logger.debug("auth: initial navigation ended with %s", exc)
                     if "code" not in callback:
-                        self._fill_and_submit_login(page)
+                        self._fill_and_submit(page, self.login_credentials)
+                        self._submit_mfa_step(page, callback)
                         deadline = time.time() + self.nav_timeout_ms / 1000
                         while "code" not in callback and time.time() < deadline:
                             page.wait_for_timeout(200)
@@ -653,26 +672,49 @@ class OAuth2Authenticator:
             data["client_secret"] = self.client_secret
         return self._submit_token_request(requester, data, refreshed=False)
 
-    def _fill_and_submit_login(self, page: Any) -> None:
+    def _fill_and_submit(self, page: Any, credentials: Dict[str, str]) -> None:
         """
-        Fill the rendered login page's inputs (matched by ``name``) from
-        ``login_credentials`` and submit. Best-effort per field: a selector
-        that doesn't match is logged and skipped rather than aborting the
-        whole flow, since the subsequent wait for ``redirect_uri`` is what
-        ultimately decides success.
+        Fill the currently rendered page's inputs (matched by ``name``) from
+        ``credentials`` and submit. Best-effort per field: a selector that
+        doesn't match is logged and skipped rather than aborting the whole
+        flow, since the subsequent wait for ``redirect_uri`` is what
+        ultimately decides success. ``page.fill`` already waits (up to
+        ``nav_timeout_ms``) for its selector to appear, so this tolerates
+        being called right after a prior submit kicked off a navigation —
+        used for both the primary login form and an optional MFA step.
         """
-        for name, value in self.login_credentials.items():
+        for name, value in credentials.items():
             try:
                 page.fill(f'input[name="{name}"]', value, timeout=self.nav_timeout_ms)
             except Exception as exc:  # noqa: BLE001 — best effort, see docstring
-                logger.debug("auth: could not fill login field %r: %s", name, exc)
+                logger.debug("auth: could not fill form field %r: %s", name, exc)
         try:
             page.click('button[type="submit"], input[type="submit"]', timeout=self.nav_timeout_ms)
         except Exception:  # noqa: BLE001 — no submit button found, fall back to Enter
             try:
                 page.keyboard.press("Enter")
             except Exception as exc:  # noqa: BLE001
-                logger.debug("auth: could not submit login form: %s", exc)
+                logger.debug("auth: could not submit form: %s", exc)
+
+    def _submit_mfa_step(self, page: Any, callback: Dict[str, str]) -> None:
+        """
+        If an MFA step is configured and the authorization code hasn't
+        already arrived (e.g. this IdP accepted the primary login outright),
+        fill and submit it on whatever page the IdP's own post-login
+        redirect rendered next — same fill-by-name/submit mechanism as the
+        primary step, with any ``{totp:SECRET}`` field resolved to a live
+        code at submission time. Best-effort and silent: if the code
+        already arrived, or no MFA page ever appears within the usual nav
+        timeout, this is a no-op — the primary step and the polling loop
+        that follows are what ultimately decide success or failure.
+        """
+        if not self.mfa_data or "code" in callback:
+            return
+        resolved = {
+            name: FormLoginAuthenticator._resolve_mfa_value(value)
+            for name, value in self.mfa_data.items()
+        }
+        self._fill_and_submit(page, resolved)
 
 
 def _pkce_pair() -> Tuple[str, str]:

@@ -8,7 +8,7 @@ import json
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 
@@ -806,21 +806,34 @@ class _AuthCodeServer:
               hidden fields so the POST below can see them.
       POST /authorize (user, pass, + the hidden fields)
            -> wrong creds: 200 "Invalid credentials" (no redirect)
-           -> right creds: 302 Location: <redirect_uri>?code=<code>&state=<state>
-              (code is single-use, bound to the code_challenge that minted it)
+           -> right creds, mfa_secret unset: 302 Location:
+              <redirect_uri>?code=<code>&state=<state> (code is single-use,
+              bound to the code_challenge that minted it)
+           -> right creds, mfa_secret set: 302 Location: /mfa?... (carrying
+              redirect_uri/state/code_challenge forward as a query string)
+              instead of issuing the code yet.
+      GET  /mfa?redirect_uri=...&state=...&code_challenge=...
+           -> an HTML OTP form (input: otp) carrying the above forward as
+              hidden fields, same shape as /authorize's own login form.
+      POST /mfa (otp, + the hidden fields)
+           -> wrong/missing otp: 200 "Invalid code" (no redirect)
+           -> otp == totp(mfa_secret): same code-issuing redirect /authorize
+              would have sent directly, had mfa_secret been unset.
       POST /token (grant_type=authorization_code|refresh_token, ...)
            -> authorization_code: verifies sha256(code_verifier) (b64url,
               unpadded) matches the stored code_challenge and the code hasn't
               already been redeemed.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, mfa_secret: "str | None" = None) -> None:
         self._lock = threading.Lock()
         self._codes: dict[str, dict] = {}
         self.current_access_token: str | None = None
         self.current_refresh_token: str | None = None
         self.grant_counts: dict[str, int] = {}
         self.authorize_hits = 0
+        self.mfa_hits = 0
+        self.mfa_secret = mfa_secret
         server = self
 
         class H(BaseHTTPRequestHandler):
@@ -842,6 +855,24 @@ class _AuthCodeServer:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _issue_code(self, redirect_uri, state, challenge):
+                """Mint a single-use code and redirect to redirect_uri with it —
+                the final step whether it's reached straight from /authorize
+                (no MFA configured) or from /mfa (MFA verified)."""
+                code = secrets.token_hex(8)
+                with server._lock:
+                    server._codes[code] = {
+                        "challenge": challenge,
+                        "redirect_uri": redirect_uri,
+                        "used": False,
+                    }
+                sep = "&" if "?" in (redirect_uri or "") else "?"
+                location = f"{redirect_uri}{sep}code={code}&state={state}"
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
             def do_GET(self):
                 if urlsplit(self.path).path == "/authorize":
                     with server._lock:
@@ -856,6 +887,19 @@ class _AuthCodeServer:
                         f'<html><body><form method="post" action="/authorize">{hidden}'
                         '<input name="user"><input name="pass" type="password">'
                         '<button type="submit">Log in</button>'
+                        "</form></body></html>",
+                    )
+                    return
+                if urlsplit(self.path).path == "/mfa":
+                    qs = parse_qs(urlsplit(self.path).query)
+                    hidden = "".join(
+                        f'<input type="hidden" name="{k}" value="{v[0]}">'
+                        for k, v in qs.items()
+                    )
+                    self._send(
+                        200,
+                        f'<html><body><form method="post" action="/mfa">{hidden}'
+                        '<input name="otp"><button type="submit">Verify</button>'
                         "</form></body></html>",
                     )
                     return
@@ -880,19 +924,29 @@ class _AuthCodeServer:
                     if user != "admin" or pw != "pw":
                         self._send(200, "Invalid credentials")
                         return
-                    code = secrets.token_hex(8)
+                    if server.mfa_secret:
+                        mfa_qs = urlencode(
+                            {"redirect_uri": redirect_uri, "state": state, "code_challenge": challenge}
+                        )
+                        self.send_response(302)
+                        self.send_header("Location", f"/mfa?{mfa_qs}")
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                    self._issue_code(redirect_uri, state, challenge)
+                    return
+
+                if path == "/mfa":
                     with server._lock:
-                        server._codes[code] = {
-                            "challenge": challenge,
-                            "redirect_uri": redirect_uri,
-                            "used": False,
-                        }
-                    sep = "&" if "?" in (redirect_uri or "") else "?"
-                    location = f"{redirect_uri}{sep}code={code}&state={state}"
-                    self.send_response(302)
-                    self.send_header("Location", location)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
+                        server.mfa_hits += 1
+                    otp = (form.get("otp") or [None])[0]
+                    redirect_uri = (form.get("redirect_uri") or [None])[0]
+                    state = (form.get("state") or [""])[0]
+                    challenge = (form.get("code_challenge") or [None])[0]
+                    if not server.mfa_secret or otp != totp(server.mfa_secret):
+                        self._send(200, "Invalid code")
+                        return
+                    self._issue_code(redirect_uri, state, challenge)
                     return
 
                 if path == "/token":
@@ -1048,6 +1102,89 @@ def test_oauth2_authorization_code_reauthenticate_without_refresh_token_redoes_b
         assert authcode_server.authorize_hits == 2
         assert req.session.headers["Authorization"] == f"Bearer {authcode_server.current_access_token}"
         assert authcode_server.current_access_token != first_token
+    finally:
+        req.close()
+
+
+# ── authorization_code + PKCE, with an MFA step ───────────────────────────────
+#
+# Same fake IdP, but one that renders an OTP page between accepting the
+# primary login and issuing the code — the shape a real MFA-protected IdP
+# login flow takes. Exercises OAuth2Authenticator._submit_mfa_step.
+
+
+@pytest.fixture
+def authcode_server_with_mfa():
+    secret = base64.b32encode(secrets.token_bytes(10)).decode()
+    s = _AuthCodeServer(mfa_secret=secret)
+    s.mfa_secret_b32 = secret  # convenience for tests building the {totp:...} field
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+def test_oauth2_authorization_code_mfa_step_succeeds(authcode_server_with_mfa):
+    server = authcode_server_with_mfa
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{server.base}/token",
+            grant_type="authorization_code",
+            client_id="cid",
+            authorize_url=f"{server.base}/authorize",
+            redirect_uri=f"{server.base}/callback",
+            login_credentials={"user": "admin", "pass": "pw"},
+            mfa_data={"otp": f"{{totp:{server.mfa_secret_b32}}}"},
+            nav_timeout_ms=_AUTHCODE_TIMEOUT_MS,
+        )
+        assert auth.login(req) is True
+        assert req.session.headers["Authorization"] == f"Bearer {server.current_access_token}"
+        assert server.mfa_hits == 1
+    finally:
+        req.close()
+
+
+def test_oauth2_authorization_code_without_mfa_data_fails_against_mfa_idp(authcode_server_with_mfa):
+    """The IdP requires MFA but mfa_data isn't configured — the flow degrades to
+    'no code', not a hang or a crash, same contract as a rejected primary login."""
+    server = authcode_server_with_mfa
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{server.base}/token",
+            grant_type="authorization_code",
+            client_id="cid",
+            authorize_url=f"{server.base}/authorize",
+            redirect_uri=f"{server.base}/callback",
+            login_credentials={"user": "admin", "pass": "pw"},
+            nav_timeout_ms=_AUTHCODE_TIMEOUT_MS,
+        )
+        assert auth.login(req) is False
+        assert "Authorization" not in req.session.headers
+        assert server.mfa_hits == 0  # never even attempted — no mfa_data to submit
+    finally:
+        req.close()
+
+
+def test_oauth2_authorization_code_mfa_data_is_noop_when_not_needed(authcode_server):
+    """mfa_data configured against an IdP that never asks for it: _submit_mfa_step
+    must see the code already arrived and skip, not error on a missing selector."""
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{authcode_server.base}/token",
+            grant_type="authorization_code",
+            client_id="cid",
+            authorize_url=f"{authcode_server.base}/authorize",
+            redirect_uri=f"{authcode_server.base}/callback",
+            login_credentials={"user": "admin", "pass": "pw"},
+            mfa_data={"otp": "000000"},
+            nav_timeout_ms=_AUTHCODE_TIMEOUT_MS,
+        )
+        assert auth.login(req) is True
+        assert req.session.headers["Authorization"] == f"Bearer {authcode_server.current_access_token}"
+        assert authcode_server.mfa_hits == 0
     finally:
         req.close()
 

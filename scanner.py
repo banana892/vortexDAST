@@ -1049,6 +1049,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--oauth2-mfa-data",
+        default=None,
+        metavar="FIELDS",
+        help=(
+            "Optional IdP MFA-step fields ('name=value&...' syntax, same as "
+            "--oauth2-login-data), for --oauth2-grant-type authorization_code. "
+            "A value of '{totp:BASE32SECRET}' is resolved to a live RFC 6238 "
+            "code at submission time. Filled into whatever page the IdP's "
+            "post-login redirect renders next; a no-op if the code already "
+            "arrived without one."
+        ),
+    )
+    parser.add_argument(
         "--role2-login-data",
         default=None,
         metavar="FIELDS",
@@ -1744,6 +1757,7 @@ def run_scan(args: argparse.Namespace) -> int:
             print("[ERROR] --oauth2-token-url requires --oauth2-client-id.", file=sys.stderr)
             return 2
         oauth2_login_credentials = None
+        oauth2_mfa_data = None
         if args.oauth2_grant_type == "authorization_code":
             if not (args.oauth2_authorize_url and args.oauth2_redirect_uri and args.oauth2_login_data):
                 print(
@@ -1755,8 +1769,10 @@ def run_scan(args: argparse.Namespace) -> int:
                 return 2
             try:
                 oauth2_login_credentials = parse_login_data(args.oauth2_login_data)
+                if args.oauth2_mfa_data:
+                    oauth2_mfa_data = parse_login_data(args.oauth2_mfa_data)
             except ValueError as exc:
-                print(f"[ERROR] invalid --oauth2-login-data: {exc}", file=sys.stderr)
+                print(f"[ERROR] invalid --oauth2-login-data/--oauth2-mfa-data: {exc}", file=sys.stderr)
                 return 2
         try:
             oauth2_authenticator = OAuth2Authenticator(
@@ -1770,6 +1786,7 @@ def run_scan(args: argparse.Namespace) -> int:
                 authorize_url=args.oauth2_authorize_url,
                 redirect_uri=args.oauth2_redirect_uri,
                 login_credentials=oauth2_login_credentials,
+                mfa_data=oauth2_mfa_data,
             )
         except ValueError as exc:
             print(f"[ERROR] invalid OAuth2 configuration: {exc}", file=sys.stderr)

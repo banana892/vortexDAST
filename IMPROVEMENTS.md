@@ -479,10 +479,26 @@ own quality:
     shape; `reauthenticate` redoes the full browser flow when there's no
     refresh token (a stray subsequent navigation to `redirect_uri`, if the
     browser gets that far, is harmless — the code is already captured by
-    then). **Known limit:** only a single login-form submission is driven —
-    a login page needing its own MFA step isn't handled — and only an HTTP
-    3xx `Location` redirect is recognised, not a client-side (JS/meta-
-    refresh) one.
+    then). **MFA step — ✅ shipped:** if the code hasn't arrived yet after
+    the primary submission (the IdP's own post-login redirect rendered an
+    MFA page instead), `_submit_mfa_step` fills and submits it too — same
+    `_fill_and_submit`/`{totp:SECRET}` mechanism as the primary step, now
+    generalised to take whichever credentials dict it's given, reusing
+    `FormLoginAuthenticator._resolve_mfa_value` rather than duplicating TOTP
+    resolution. A no-op when the code already arrived without one (no
+    MFA page to fill), so configuring `--oauth2-mfa-data` against an IdP
+    that never needs it is harmless. New CLI flag: `--oauth2-mfa-data`.
+    `tests/test_auth.py` extends `_AuthCodeServer` with an opt-in MFA page
+    between `/authorize` and the code-issuing redirect, covering: full flow
+    with a live TOTP secret, the IdP-requires-MFA-but-none-configured
+    failure path (degrades to no code, same as a rejected primary login —
+    no hang), and the no-op case against the existing non-MFA server
+    fixture. **Known limit:** only an HTTP 3xx `Location` redirect is
+    recognised for the final code delivery, not a client-side (JS/meta-
+    refresh) one. (Role-matrix MFA for OAuth2 remains out of scope, same as
+    form login's own role-matrix second identity — a second account's MFA
+    secret always differs per-account and neither mechanism has a
+    per-identity MFA config to plug in yet.)
   - ✅ *shipped:* **role matrix for OAuth2** (`--role2-oauth2-*`) — a second,
     independently authenticated `OAuth2Authenticator`, mirroring
     `--role2-login-data`'s "same mechanism, different credentials" shape:
@@ -1136,3 +1152,27 @@ Ordered by impact; several are now *resolved by the plan above*.
   `tests/test_json_fuzz.py` and `tests/test_adapter_interactsh.py` cover
   both fixes (path-segment `replace`, all three XXE shapes, and the
   preserved-query-string assertion).
+- 2026-10-15 — OAuth2 `authorization_code`'s MFA-step limit closed, the
+  last `shortcut:` comment in the codebase. `core/auth.py`'s
+  `OAuth2Authenticator._fill_and_submit_login` generalised to
+  `_fill_and_submit(page, credentials)` (no behaviour change for the
+  primary step — same method, now parameterised), and a new
+  `_submit_mfa_step` calls it again with a resolved `mfa_data` dict
+  (reusing `FormLoginAuthenticator._resolve_mfa_value` for the
+  `{totp:SECRET}` placeholder, not duplicated) whenever the code hasn't
+  already arrived after the primary submission — i.e. whenever the IdP's
+  own post-login redirect rendered an MFA page instead of going straight
+  to `redirect_uri`. A no-op otherwise, so over-configuring `mfa_data`
+  against an IdP that doesn't need it costs nothing. New CLI flag:
+  `--oauth2-mfa-data` (`scanner.py`, parsed alongside `--oauth2-login-data`
+  in the same `authorization_code` branch). `tests/test_auth.py` extends
+  `_AuthCodeServer` with an opt-in MFA page (`mfa_secret` constructor
+  param) between the primary `/authorize` POST and the code-issuing
+  redirect; three new tests cover the full live-TOTP flow, the
+  IdP-requires-MFA-but-`mfa_data`-unset failure path (degrades to no code,
+  not a hang), and the no-op case against the pre-existing non-MFA server
+  fixture. Role-matrix MFA for OAuth2 stays out of scope — checked that
+  form login's own role-matrix second identity (`scanner.py`'s
+  `--role2-login-data` wiring) already doesn't pass `mfa_url`/`mfa_data`
+  either, so this keeps both mechanisms consistent rather than introducing
+  it asymmetrically for OAuth2 only.
