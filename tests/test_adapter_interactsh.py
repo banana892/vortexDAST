@@ -94,7 +94,11 @@ class _RecordingHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8", errors="replace")
-        self.seen_posts.append({"content_type": self.headers.get("Content-Type"), "body": body})
+        self.seen_posts.append({
+            "content_type": self.headers.get("Content-Type"),
+            "body": body,
+            "query": parse_qs(urlsplit(self.path).query),
+        })
         self.send_response(200)
         self.end_headers()
 
@@ -213,13 +217,13 @@ class TestParse:
         assert findings[0].extra["vuln_class"] == kind
 
     def test_xxe_finding_has_no_real_parameter(self):
-        """XXE has no query parameter at all — the <xml body> placeholder shows up instead."""
+        """XXE has no query parameter at all — the <xml body (...)> placeholder shows up instead."""
         adapter = InteractshAdapter()
         adapter._target = "http://app.local/api"
-        adapter._domain_to_combo = {"fakeid0": ("<xml body>", "xxe")}
+        adapter._domain_to_combo = {"fakeid0": ("<xml body (bare)>", "xxe")}
         findings = adapter.parse('{"protocol":"http","unique-id":"fakeid0"}\n')
         assert len(findings) == 1
-        assert findings[0].parameter == "<xml body>"
+        assert findings[0].parameter == "<xml body (bare)>"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -254,26 +258,41 @@ class TestRun:
         assert len(callback_probes) == 1
         assert callback_probes[0]["name"] == ["bob"]
 
-        # Plus exactly one XXE POST, unrelated to either query parameter.
-        assert len(seen_posts) == 1
-        assert seen_posts[0]["content_type"] == "application/xml"
-        assert "<!ENTITY xxe SYSTEM \"http://fakeid" in seen_posts[0]["body"]
+        # Plus exactly one XXE POST per delivery shape (bare/SOAP/multipart),
+        # unrelated to either query parameter.
+        assert len(seen_posts) == 3
+        content_types = {p["content_type"] for p in seen_posts}
+        assert any(ct == "application/xml" for ct in content_types)
+        assert any((ct or "").startswith("text/xml") for ct in content_types)
+        assert any((ct or "").startswith("multipart/form-data") for ct in content_types)
+
+        bare = next(p for p in seen_posts if p["content_type"] == "application/xml")
+        assert "<!ENTITY xxe SYSTEM \"http://fakeid" in bare["body"]
+        soap = next(p for p in seen_posts if (p["content_type"] or "").startswith("text/xml"))
+        assert "<soap:Envelope" in soap["body"]
+        multipart = next(p for p in seen_posts if (p["content_type"] or "").startswith("multipart/form-data"))
+        assert "<!ENTITY xxe SYSTEM \"http://fakeid" in multipart["body"]
+
+        # Every XXE POST landed on the target's exact URL, original query
+        # string included (requests.post never drops it from the URL).
+        assert all(p["query"] == {"callback": ["orig"], "name": ["bob"]} for p in seen_posts)
 
     def test_no_params_still_runs_the_xxe_probe(
         self, fake_client_on_path, recording_target, monkeypatch
     ):
-        """No query parameters at all — only the parameter-independent XXE probe fires."""
+        """No query parameters at all — only the parameter-independent XXE probes fire."""
         monkeypatch.setattr("adapters.interactsh_adapter._SETTLE_SECONDS", 1.0)
         base, seen, seen_posts = recording_target
         adapter = InteractshAdapter()
         findings = adapter.run(base + "/", ScanContext(tool_timeout=30))
 
         assert seen == []  # no GET probes — nothing to substitute into
-        assert len(seen_posts) == 1
-        assert seen_posts[0]["content_type"] == "application/xml"
+        assert len(seen_posts) == 3  # one per XXE delivery shape
         assert len(findings) == 1
         assert findings[0].extra["vuln_class"] == "xxe"
-        assert findings[0].parameter == "<xml body>"
+        # The fake client's one canned interaction is always for the first
+        # requested domain — here, the first (bare) XXE probe.
+        assert findings[0].parameter == "<xml body (bare)>"
 
     def test_absent_binary_skips_cleanly(self, monkeypatch):
         monkeypatch.setattr(InteractshAdapter, "is_available", lambda self: False)
@@ -318,10 +337,13 @@ class TestRunWithCrawledEndpoint:
 
         # No query parameters at all, so no GET probes.
         assert seen == []
-        # Two fields × 5 payload specs = 10 form-encoded POSTs, plus the one
-        # parameter-independent XXE POST (application/xml) — distinguishable
+        # Two fields × 5 payload specs = 10 form-encoded POSTs, plus one
+        # parameter-independent XXE POST per delivery shape — distinguishable
         # by content type.
-        form_posts = [p for p in seen_posts if p["content_type"] != "application/xml"]
+        form_posts = [
+            p for p in seen_posts
+            if (p["content_type"] or "").startswith("application/x-www-form-urlencoded")
+        ]
         assert len(form_posts) == 10
         assert any("username=http%3A%2F%2Ffakeid" in p["body"] for p in form_posts)
         # The untouched field keeps its original value on every probe.
@@ -376,9 +398,8 @@ class TestRunWithCrawledEndpoint:
         ctx = ScanContext(tool_timeout=30, extra={"endpoints": [other_endpoint]})
         findings = InteractshAdapter().run(target, ctx)
 
-        # Only the parameter-independent XXE probe should have run.
+        # Only the parameter-independent XXE probes should have run.
         assert seen == []
-        assert len(seen_posts) == 1
-        assert seen_posts[0]["content_type"] == "application/xml"
+        assert len(seen_posts) == 3
         assert len(findings) == 1
         assert findings[0].extra["vuln_class"] == "xxe"

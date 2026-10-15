@@ -124,10 +124,19 @@ class TestFuzzTargetsFor:
         assert replaced == {"qty": {"$ne": "x"}}
         assert captured.body == {"qty": 3}
 
-    def test_path_target_has_no_replace(self) -> None:
+    def test_path_target_replace_substitutes_whole_segment(self) -> None:
         captured = CapturedJsonRequest(url="http://x/api/widgets/7", method="POST", body={"qty": 3})
         path_target = next(t for t in fuzz_targets_for(captured) if t.kind == "path")
-        assert path_target.replace is None
+        assert path_target.replace is not None
+        url, body = path_target.replace("INJECT")
+        assert url == "http://x/api/widgets/INJECT"
+        assert body == {"qty": 3}
+
+    def test_path_target_replace_coerces_non_string_value(self) -> None:
+        captured = CapturedJsonRequest(url="http://x/api/widgets/7", method="POST", body={"qty": 3})
+        path_target = next(t for t in fuzz_targets_for(captured) if t.kind == "path")
+        url, _ = path_target.replace(99)
+        assert url == "http://x/api/widgets/99"
 
     def test_no_fuzzable_path_segments_yields_body_only(self) -> None:
         captured = CapturedJsonRequest(url="http://x/api/widgets", method="POST", body={"qty": 3})

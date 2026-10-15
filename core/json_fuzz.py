@@ -19,6 +19,14 @@ This module provides the walking/rebuilding primitives so each module keeps
 its own detection logic (error patterns, boolean-blind diffing, reflection
 checks, ...) and only needs to plug in a new *target* to fuzz, not a new
 fuzzing engine.
+
+Both kinds of target support appending to the original value (``build``) and
+replacing it outright (``replace``). A path segment's ``replace`` only ever
+takes a string (coerced via ``str()``) — a URL path segment can't hold an
+arbitrary JSON value the way a body leaf can (e.g. nosql's
+``{"$ne": ...}`` operator-injection object), but a plain string substitution
+(what an OOB callback payload or an XSS canary needs) works the same way
+for both kinds.
 """
 
 from __future__ import annotations
@@ -163,9 +171,11 @@ class FuzzTarget:
     #: probe_value -> (url, json_body), appending probe_value to the
     #: original value. Works for both kinds.
     build: Callable[[str], Tuple[str, Any]]
-    #: new_value -> (url, json_body), replacing the leaf outright. Only set
-    #: for ``"body"`` targets — a URL path segment can't hold a non-string
-    #: JSON value.
+    #: new_value -> (url, json_body), replacing the leaf/segment outright.
+    #: For a ``"body"`` target, ``new_value`` may be any JSON-serialisable
+    #: value (e.g. nosql's ``{"$ne": ...}`` operator-injection object). For
+    #: a ``"path"`` target it's coerced to ``str`` — a URL path segment can
+    #: only ever hold a string, never an arbitrary JSON value.
     replace: Optional[Callable[[Any], Tuple[str, Any]]] = None
 
 
@@ -195,6 +205,17 @@ def fuzz_targets_for(
         def _build_path(probe_value: str, _index=index, _segment=segment) -> Tuple[str, Any]:
             return substitute_path_segment(captured.url, _index, _segment + probe_value), captured.body
 
-        targets.append(FuzzTarget(label=label, original=segment, kind="path", build=_build_path))
+        def _replace_path(new_value: Any, _index=index) -> Tuple[str, Any]:
+            return substitute_path_segment(captured.url, _index, str(new_value)), captured.body
+
+        targets.append(
+            FuzzTarget(
+                label=label,
+                original=segment,
+                kind="path",
+                build=_build_path,
+                replace=_replace_path,
+            )
+        )
 
     return targets

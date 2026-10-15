@@ -189,19 +189,25 @@ the seed URL — see Phase E's "full data-chaining," now shipped.
    payloads/point multiplies request volume. A target with no probe points
    at all skips the substitution probes entirely (nothing to substitute
    into), but the client still starts — **blind XXE needs no probe point at
-   all**: it's a dedicated `_send_xxe_probe` that POSTs a crafted
-   external-entity XML document (`_render_xxe_payload`, bare
-   `application/xml`) straight to the target's own URL, confirmed by the
-   same DNS/HTTP callback mechanism as everything else here, surfaced with
-   a `<xml body>` placeholder in place of a parameter name since there
-   isn't one. **Known limit:** a REST-style path segment isn't a probe
-   point (`core/json_fuzz.py`'s path-segment target only supports
-   *appending*, not the full-value replacement an OOB payload needs); and
-   the XXE probe only tries a bare `application/xml` POST — not a SOAP
-   envelope, not a multipart/XML part, and the target's existing query
-   parameters (if any) aren't re-sent alongside the body; left for a
-   follow-up if a real target's XML endpoint needs a different
-   shape to parse the body at all.
+   all**: it now sends three dedicated XXE probes, one per delivery shape
+   a real XML endpoint might expect — a bare `application/xml` POST
+   (`_send_xxe_probe_bare`/`_render_xxe_payload`), a SOAP 1.1 envelope
+   (`_send_xxe_probe_soap`/`_render_xxe_soap_payload`), and a
+   `multipart/form-data` upload with the XML as a file part
+   (`_send_xxe_probe_multipart`) — each straight to the target's own URL
+   (query string untouched; a POST never drops it), confirmed by the same
+   DNS/HTTP callback mechanism as everything else here, each surfaced with
+   its own `<xml body (shape)>` placeholder in place of a parameter name
+   since there isn't one. **Both follow-ups from the original scope are
+   now closed:** a REST-style path segment is a probe point too —
+   `core/json_fuzz.py`'s path-segment target gained a `replace` (full-value
+   substitution, coerced to `str`) alongside its existing append-only
+   `build`, so `_json_request_points` (renamed from `_json_body_points`)
+   picks up both JSON leaves and path segments with no new parsing logic;
+   and the XXE probe covers all three delivery shapes above (the "query
+   parameters aren't re-sent" concern turned out not to be a real bug —
+   `requests.post(target, ...)` already sends to `target`'s literal URL,
+   query string included).
 
 ### Phase D — Our own web-app depth (unique value, not outsourced)
 These are the things no external tool gives us and that define VortexDAST's
@@ -1108,3 +1114,25 @@ Ordered by impact; several are now *resolved by the plan above*.
   only against other JSON-carrying endpoints — a plain page endpoint still
   dedups on URL alone. New regression test: a page at `/samepath` that
   also `fetch()`-POSTs to `/samepath` now yields two endpoints, not one.
+- 2026-10-15 — `interactsh`'s last two known limits closed. `core/json_fuzz.py`'s
+  path-segment `FuzzTarget` gained a `replace` (full-value substitution,
+  coerced to `str` — a path segment can't hold an arbitrary JSON value the
+  way a body leaf can) alongside its existing append-only `build`, so
+  `InteractshAdapter._json_request_points` (renamed from
+  `_json_body_points`) now picks up a captured JSON request's REST-style
+  path segments as probe points too, with zero new parsing logic — the
+  same leaf-walker every other consumer already shares. Separately, the
+  blind-XXE probe now sends three delivery shapes instead of one — bare
+  `application/xml` (unchanged), a SOAP 1.1 envelope, and a
+  `multipart/form-data` upload with the XML as a file part — each its own
+  correlation domain, so a target accepting only one shape still gets
+  caught; `_XXE_PARAM_LABEL` became three distinct `<xml body (shape)>`
+  placeholders so a finding names which shape triggered the parse. The
+  third original concern ("the target's existing query parameters aren't
+  re-sent alongside the body") turned out not to be a real bug on
+  inspection — `requests.post(target, ...)` already POSTs to `target`'s
+  literal URL, query string included — confirmed with a new test
+  asserting every XXE POST lands with the original query string intact.
+  `tests/test_json_fuzz.py` and `tests/test_adapter_interactsh.py` cover
+  both fixes (path-segment `replace`, all three XXE shapes, and the
+  preserved-query-string assertion).
