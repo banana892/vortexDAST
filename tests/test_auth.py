@@ -825,7 +825,7 @@ class _AuthCodeServer:
               already been redeemed.
     """
 
-    def __init__(self, mfa_secret: "str | None" = None) -> None:
+    def __init__(self, mfa_secret: "str | None" = None, js_redirect: bool = False) -> None:
         self._lock = threading.Lock()
         self._codes: dict[str, dict] = {}
         self.current_access_token: str | None = None
@@ -834,6 +834,7 @@ class _AuthCodeServer:
         self.authorize_hits = 0
         self.mfa_hits = 0
         self.mfa_secret = mfa_secret
+        self.js_redirect = js_redirect
         server = self
 
         class H(BaseHTTPRequestHandler):
@@ -856,9 +857,12 @@ class _AuthCodeServer:
                 self.wfile.write(data)
 
             def _issue_code(self, redirect_uri, state, challenge):
-                """Mint a single-use code and redirect to redirect_uri with it —
-                the final step whether it's reached straight from /authorize
-                (no MFA configured) or from /mfa (MFA verified)."""
+                """Mint a single-use code and send the browser to redirect_uri
+                with it — the final step whether it's reached straight from
+                /authorize (no MFA configured) or from /mfa (MFA verified).
+                Delivered either as an HTTP 3xx Location redirect, or — when
+                server.js_redirect is set — as a 200 HTML page that navigates
+                there via JS, the client-side shape some real IdPs use."""
                 code = secrets.token_hex(8)
                 with server._lock:
                     server._codes[code] = {
@@ -868,6 +872,9 @@ class _AuthCodeServer:
                     }
                 sep = "&" if "?" in (redirect_uri or "") else "?"
                 location = f"{redirect_uri}{sep}code={code}&state={state}"
+                if server.js_redirect:
+                    self._send(200, f'<html><body><script>window.location = "{location}";</script></body></html>')
+                    return
                 self.send_response(302)
                 self.send_header("Location", location)
                 self.send_header("Content-Length", "0")
@@ -1029,6 +1036,29 @@ def test_oauth2_authorization_code_pkce_full_flow(authcode_server):
         assert authcode_server.authorize_hits == 1
     finally:
         req.close()
+
+
+def test_oauth2_authorization_code_client_side_redirect():
+    """Some IdPs hand back the code via a client-side (JS) redirect instead
+    of an HTTP 3xx Location header — the code must still be captured."""
+    server = _AuthCodeServer(js_redirect=True)
+    req = _requester()
+    try:
+        auth = OAuth2Authenticator(
+            token_url=f"{server.base}/token",
+            grant_type="authorization_code",
+            client_id="cid",
+            authorize_url=f"{server.base}/authorize",
+            redirect_uri=f"{server.base}/callback",
+            login_credentials={"user": "admin", "pass": "pw"},
+            nav_timeout_ms=_AUTHCODE_TIMEOUT_MS,
+        )
+        assert auth.login(req) is True
+        assert req.session.headers["Authorization"] == f"Bearer {server.current_access_token}"
+        assert server.grant_counts.get("authorization_code") == 1
+    finally:
+        req.close()
+        server.close()
 
 
 def test_oauth2_authorization_code_wrong_credentials_fails(authcode_server):

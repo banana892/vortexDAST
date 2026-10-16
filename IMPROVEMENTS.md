@@ -1152,6 +1152,20 @@ Ordered by impact; several are now *resolved by the plan above*.
   `tests/test_json_fuzz.py` and `tests/test_adapter_interactsh.py` cover
   both fixes (path-segment `replace`, all three XXE shapes, and the
   preserved-query-string assertion).
+- 2026-10-16 — OAuth2 `authorization_code`'s client-side-redirect limit
+  closed, the last open "Known limit" under "Authenticated scanning":
+  `_browser_authorize` used to pull the code only out of an HTTP 3xx
+  `Location` header, via a `page.on("response")` listener — an IdP that
+  delivers the code via a client-side redirect (`window.location` or a
+  `<meta http-equiv="refresh">`) issues no such header, so the code was
+  never seen. Switched to `page.on("request")`, which fires for the
+  browser's outgoing navigation to `redirect_uri` regardless of which of
+  the three delivery shapes got it there — reading the code straight off
+  that request's URL needed no `urljoin` against a relative `Location`
+  either, since the browser already resolves that before issuing the
+  request. `tests/test_auth.py`'s fake IdP gained a `js_redirect` mode
+  (issues the code via a `<script>window.location = ...</script>` page
+  instead of a 302) and a new test confirming the flow still completes.
 - 2026-10-15 — OAuth2 `authorization_code`'s MFA-step limit closed, the
   last `shortcut:` comment in the codebase. `core/auth.py`'s
   `OAuth2Authenticator._fill_and_submit_login` generalised to

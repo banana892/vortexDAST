@@ -76,7 +76,7 @@ import secrets
 import struct
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
-from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from .parser import HTMLParser
 
@@ -555,26 +555,27 @@ class OAuth2Authenticator:
         Drive a headless Chromium through the authorization server's login
         page to obtain an authorization code, then exchange it for a token.
 
-        The code is pulled out of the ``Location`` header of the server's own
-        HTTP redirect to ``redirect_uri`` (a ``page.on("response")``
-        listener, checked against every response as it arrives) rather than
-        by letting the browser actually navigate there and inspecting the
-        resulting URL — Chromium/Playwright don't re-run a page-level
+        The code is pulled out of the URL of the browser's own outgoing
+        navigation request to ``redirect_uri`` (a ``page.on("request")``
+        listener, checked against every request as it's dispatched) rather
+        than by letting the browser actually load that page and inspecting
+        ``page.url`` — Chromium/Playwright don't re-run a page-level
         ``route()`` handler for a redirect hop chained off a request that was
         itself allowed through, so blocking the navigation that way isn't
-        reliable. Reading the header means ``redirect_uri`` never needs to
-        resolve to anything real, and a stray subsequent navigation attempt
-        (which may well fail to load) is harmless — the code is already
-        captured by the time it's dispatched.
+        reliable. A request event fires for *any* navigation to that URL,
+        whichever delivery shape the IdP uses to get there — an HTTP 3xx
+        ``Location`` redirect, a client-side JS redirect
+        (``window.location``), or a ``<meta http-equiv="refresh">`` — since
+        all three end the same way: the browser issuing a request for
+        ``redirect_uri?code=...``. Reading the URL off the request means
+        ``redirect_uri`` never needs to resolve to anything real, and the
+        navigation failing to load (it won't resolve) is harmless — the code
+        is already captured by the time the request is dispatched.
 
         Never raises: a missing Playwright install, a browser that fails to
         launch, a login the IdP rejects, or a navigation that never reaches
         ``redirect_uri`` all degrade to a logged error and ``False`` — the
         same "must not crash the scan" contract as ``DomWatcher.crawl``.
-
-        shortcut: only an HTTP 3xx ``Location`` redirect to ``redirect_uri``
-        is recognised — an IdP that hands back the code via a client-side
-        (JS/meta-refresh) redirect instead isn't handled.
         """
         try:
             from playwright.sync_api import Error as PlaywrightError
@@ -602,23 +603,18 @@ class OAuth2Authenticator:
 
         callback: Dict[str, str] = {}
 
-        def _on_response(response: Any) -> None:
+        def _on_request(request: Any) -> None:
             if "code" in callback:
                 return
             try:
-                if not (300 <= response.status < 400):
+                url = request.url
+                if not url.startswith(self.redirect_uri or "\0"):
                     return
-                location = response.headers.get("location")
-                if not location:
-                    return
-                target = urljoin(response.url, location)
-                if not target.startswith(self.redirect_uri or "\0"):
-                    return
-                qs = parse_qs(urlsplit(target).query)
+                qs = parse_qs(urlsplit(url).query)
                 if qs.get("code"):
                     callback["code"] = qs["code"][0]
                 callback["state"] = (qs.get("state") or [""])[0]
-            except Exception:  # noqa: BLE001 — a malformed response must not crash the flow
+            except Exception:  # noqa: BLE001 — a malformed request must not crash the flow
                 return
 
         try:
@@ -631,7 +627,7 @@ class OAuth2Authenticator:
                 try:
                     page = browser.new_context().new_page()
                     page.set_default_navigation_timeout(self.nav_timeout_ms)
-                    page.on("response", _on_response)
+                    page.on("request", _on_request)
                     try:
                         page.goto(authorize_url, wait_until="load")
                     except Exception as exc:  # noqa: BLE001 — see docstring: a nav error
