@@ -469,11 +469,14 @@ own quality:
     login page: navigates to `--oauth2-authorize-url` with a generated PKCE
     challenge, fills `--oauth2-login-data` into the rendered login form's
     inputs by `name` and submits, then reads the authorization code out of
-    the server's HTTP redirect `Location` header back to
-    `--oauth2-redirect-uri` — via a `page.on("response")` listener, not by
-    letting the browser actually navigate there, since Chromium/Playwright
+    the browser's own outgoing navigation request back to
+    `--oauth2-redirect-uri` — via a `page.on("request")` listener, not by
+    letting the browser actually load that page, since Chromium/Playwright
     don't reliably re-route a redirect chained off an already-continued
-    request — and exchanges it plus the PKCE verifier for a token.
+    request. A request event fires for that navigation whichever delivery
+    shape the IdP uses — an HTTP 3xx `Location` redirect, a client-side JS
+    redirect, or a `<meta http-equiv="refresh">` — and exchanges it plus the
+    PKCE verifier for a token.
     `--oauth2-redirect-uri` never needs to resolve to anything real. Shares
     `OAuth2Authenticator`'s `login`/`is_session_valid`/`reauthenticate`
     shape; `reauthenticate` redoes the full browser flow when there's no
@@ -493,9 +496,7 @@ own quality:
     with a live TOTP secret, the IdP-requires-MFA-but-none-configured
     failure path (degrades to no code, same as a rejected primary login —
     no hang), and the no-op case against the existing non-MFA server
-    fixture. **Known limit:** only an HTTP 3xx `Location` redirect is
-    recognised for the final code delivery, not a client-side (JS/meta-
-    refresh) one. (Role-matrix MFA for OAuth2 remains out of scope, same as
+    fixture. (Role-matrix MFA for OAuth2 remains out of scope, same as
     form login's own role-matrix second identity — a second account's MFA
     secret always differs per-account and neither mechanism has a
     per-identity MFA config to plug in yet.)
